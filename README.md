@@ -1,126 +1,190 @@
 # MOTION: HEIST
 
-> **YOUR BODY IS THE CONTROLLER**
+> **Тело вместо джойстика.** Кинематографичное ограбление сейфа, которым управляют только движения перед обычной веб-камерой.
 
-MOTION: HEIST is a browser-based cinematic vault infiltration game created for the Admit Hackathon **Motion / Camera instead of joystick** case. The player completes one short mission with a webcam: scan access, dodge two laser beams, duck under a low beam, and open the vault.
+**Admit Hackathon 2026 · кейс «Motion. Камера вместо джойстика» · направление A / GAME**
 
-The application uses MediaPipe only to obtain body landmarks. Gesture recognition, temporal validation, error diagnosis, mission flow, scoring, and feedback are implemented in project code.
+Игрок проходит миссию из пяти движений: сканирует допуск, уклоняется от двух лазеров, подныривает под луч и голыми руками разрывает створки сейфа. MediaPipe даёт только 33 точки тела. Распознавание, валидация во времени, диагностика ошибок, коллизии, физика, звук и счёт написаны нами.
 
-## Run locally
+---
 
-Requirements: Node.js 20+ and a webcam. Camera permissions work on `localhost` and HTTPS deployments.
+## Запуск за 2 команды
 
 ```bash
 npm install
 npm run dev
 ```
 
-Open the URL printed by Vite (normally `http://localhost:5173`). Click **START HEIST**, allow camera access, step back so shoulders, hips, knees, and ankles are in frame, then hold still briefly for calibration.
+Откройте `http://localhost:5173`, нажмите **START HEIST** и разрешите камеру. Это единственный клик: дальше управляет только тело.
 
-Production verification:
+- **Node.js** `^20.19` или `>=22.12` (требование Vite 8). Браузер: Chrome, Edge или Safari с веб-камерой.
+- Камера работает на `localhost` и по HTTPS.
+- **Работает без интернета** после `npm install`: WASM-рантайм MediaPipe собирается в бандл, модель лежит в `public/models/`, а CDN используется только как запасной вариант.
+- Прод-сборка: `npm run build && npm run preview`. Проверка типов: `npm run lint` (TypeScript strict).
 
-```bash
-npm run build
-npm run preview
+---
+
+## Как играть
+
+1. Встаньте в 2–3 м от камеры, чтобы были видны голова и лодыжки. **Или просто сидите за ноутбуком**: игра сама перейдёт в Desk Mode.
+2. Замрите на секунду: калибровка запоминает ваш рост и пропорции.
+3. Повторяйте голографический силуэт. Счётчик `SYNC` показывает, насколько поза совпадает с эталоном.
+4. Если движение неточное, система скажет, **что** не так и **как** исправить, с числами.
+5. В финальном досье камера остаётся включённой как окно «CCTV». Чтобы сыграть ещё раз, поднимите обе руки над головой на 1.2 с: клавиатура и мышь снова не нужны.
+
+Таймер никогда не обрывает миссию. По истечении времени начинается `OVERTIME`: очки за движения делятся пополам, но финал всегда достижим.
+
+---
+
+## 5 движений и их физические пороги
+
+Все пороги нормированы на тело игрока: высоту торса, ширину плеч и калибровку. Поэтому они работают для любого роста и любой дистанции. Конфиг: [`src/motion/gestureConfig.ts`](src/motion/gestureConfig.ts).
+
+| # | Фаза и действие в игре | Движение | Что считаем поверх landmarks | Порог | Удержание |
+|---|---|---|---|---|---|
+| 1 | **SCAN ACCESS**: открывает узел охраны | правая рука выше плеча | `(shoulder.y − wrist.y) / torso` | ≥ 0.42 | 620 мс |
+| 2 | **DODGE LEFT**: уклон от лазера | наклон корпуса влево | угол `плечи → опора бёдер` к вертикали, в **истинных** градусах (с поправкой на аспект кадра) | ≤ −15° | 560 мс |
+| 3 | **DODGE RIGHT**: уклон от лазера | наклон корпуса вправо | тот же угол | ≥ +15° | 560 мс |
+| 4 | **DUCK UNDER LASER**: пройти под лучом | нырок под луч | стоя: нос, плечи и бёдра ниже `Y = shoulderY + 0.25·torso`; сидя: уровень `0.7·плечи + 0.3·нос` опустился | стоя: весь скелет под лучом; сидя: ≥ 22% торса | 720 мс |
+| 5 | **OPEN VAULT**: взлом сейфа | *PALM LOCK*: ладони на сканерах → *KINETIC BREACH*: развести руки | расстояние запястья до сканера; `(gap − gap₀) / (1.2 · shoulderWidth)` | радиус 12% ширины кадра; разведение ≥ 0.95 | 400 мс захват |
+
+Каждое движение проходит конечный автомат `IDLE → ATTEMPT → VALIDATING → SUCCESS → COOLDOWN`. Засчитывается только **удержанная** поза. Если отпустить позу, валидация сбрасывается. Cooldown 850 мс исключает двойные срабатывания, а кадры с низкой уверенностью модели не засчитываются.
+
+---
+
+## Режим «ошибка» (твист)
+
+Система не пишет «жест не распознан». Она находит, **какая часть тела** сделала не так, **насколько** (в см, градусах или процентах) и **что сделать**, и показывает это прямо в сцене.
+
+**Как это устроено** ([`src/errors/errorAnalyzer.ts`](src/errors/errorAnalyzer.ts), [`src/motion/gestureEngine.ts`](src/motion/gestureEngine.ts)):
+
+- **Диагноз только при застое, а не во время перехода.** Ошибка выдаётся, если попытка длится больше 480 мс **и** прогресс за последние 400 мс вырос меньше чем на 4%. Игрок, который ещё приседает правильно, штраф не получает.
+- **Живые числа.** Панель ошибки обновляет «сейчас / цель» в реальном времени, пока игрок исправляется.
+- **Диегетическая подсказка.** Лазер искрит в точке касания, проблемный сустав мигает, от него вниз идёт стрелка `LOWER BY 21 CM`, а скелет подсвечивает нужные точки.
+- **Справедливо.** Каждый диагноз штрафуется один раз за фазу (−120). Исправление измеряется и вознаграждается: до +150 за исправление в пределах 1.5 с.
+
+**Реальные подсказки игры:**
+
+| Движение | Что заметила система | Подсказка | Сейчас → цель |
+|---|---|---|---|
+| SCAN ACCESS | `RIGHT HAND TOO LOW` | Raise your right hand above your shoulder. | `27% LIFT → 42% LIFT` |
+| DODGE | `WRONG DODGE DIRECTION` (путаница зеркала) | Straighten up, then lean to your left — toward the ← side of the screen. | `13° RIGHT → 15° LEFT` |
+| DODGE | `TORSO TILT TOO SMALL` | Lean 6° further to the left. | `9° → 15° LEFT` |
+| DUCK (стоя) | `LASER CONTACT — HEAD`; луч искрит, голова мигает | стрелка на Canvas: `LOWER BY 21 CM (CURRENT: 27%, TARGET: 70%)` | `27% DROP → 70% DROP` |
+| DUCK (сидя) | `LOWER HEAD & CHEST` | Lean down toward the desk by 7 cm — tuck your chin and fold your chest. | `9% DROP → 22% DROP` |
+| OPEN VAULT | `RIGHT PALM OFF SCANNER` | Move your right hand onto the right scanner and hold both still. | `18% AWAY → WITHIN 12%` |
+| OPEN VAULT | `DON'T RELEASE — PULL WIDER`; створки захлопываются на пружинах | Re-grip both scanners, then pull your hands straight apart at chest height. | `LAST PULL 35% → 95%` |
+
+Весь путь ошибки попадает в итоговое досье: какая аномалия, какая инструкция, за сколько секунд исправлено, какой бонус.
+
+---
+
+## Архитектура: что делает MediaPipe, а что мы
+
+```
+Webcam ─► MediaPipe Pose Landmarker (lite)          ← только 33 точки тела
+             │
+             ▼   всё ниже написано нами
+   зеркалирование и нормализация (торс, плечи, аспект кадра)
+             │
+   LowerBodyTracker ──► full / desk режим (окно 30 кадров, гистерезис)
+   BaselineManager  ──► калибровка отдельно для каждой дистанции
+             │
+   extractMetrics ──► подъём руки, истинный угол наклона, падение уровня,
+             │         углы коленей, лазерная коллизия, сканеры сейфа
+             ▼
+   GestureEngine (автомат удержаний, cooldown, детектор застоя)
+       │                 │                    │
+       ▼                 ▼                    ▼
+ errorAnalyzer     VaultBreach FSM     poseTemplates (косинусное SYNC)
+       │                 │                    │
+       └──────► App: миссия, счёт, телеметрия, звук ◄────┘
+                         │
+   Canvas-слои: скелет · голограмма · лазер · створки   ·   Web Audio: процедурный синтез
 ```
 
-## Mission flow
+| Папка | Что внутри |
+|---|---|
+| `src/motion/` | геометрия, пороги, калибровка, `GestureEngine`, Desk Mode, шаблоны поз, автомат сейфа |
+| `src/laser/` | коллизия луча со скелетом (см/проценты) и Canvas-рендер: искры, стрелка, свечение |
+| `src/errors/` | диагнозы с конкретными инструкциями и живыми числами |
+| `src/components/` | голограмма `SYNC`, створки сейфа, экран-досье |
+| `src/game/` | миссия из 5 фаз, финальная сцена сейфа |
+| `src/audio/` | процедурный звук на Web Audio: разряд, зарядка, скрежет, гидроудар (без аудиофайлов) |
+| `src/scoring/` | очки, ранги, телеметрия, лидерборд (`localStorage`) |
+| `src/hooks/` | жизненный цикл камеры и инференса, лазерный цикл |
 
-1. **SCAN ACCESS** - raise the right hand above the right shoulder.
-2. **DODGE LEFT** - lean the torso to the left.
-3. **DODGE RIGHT** - lean the torso to the right.
-4. **DUCK UNDER LASER** - squat deeply enough to lower the hips and flex both knees.
-5. **OPEN VAULT** - hold both hands forward toward the camera.
+Видео не покидает браузер: кадры и точки никуда не отправляются.
 
-The main game loop lasts 90 seconds. **Jury Demo Mode** is enabled by default on the landing screen and runs the identical five-step sequence in 55 seconds, keeping the full flow quick during a presentation. A slow phase shows a non-blocking mission warning instead of ending the mission. Finished runs show a scorecard and persist the local top 10 leaderboard in `localStorage`.
+---
 
-## Gesture engine
+## Фичи, которые выделяют проект
 
-```
-Webcam -> MediaPipe Pose Landmarker -> normalized landmarks
-       -> feature extraction -> temporal gesture engine -> mission state machine
-                                      |                         |
-                                      v                         v
-                               error analyzer              score / effects
-```
+- **Физический лазер (DUCK UNDER LASER).** Луч на Canvas сталкивается с суставами. При касании: пульсация, 12–16 искр, треск разряда (белый шум через bandpass 800 Гц), мигающий сустав и стрелка с числом в сантиметрах. Прошёл под лучом: луч становится зелёным и появляется `BEAM CLEARED`.
+- **Desk Mode.** Если ноги не видны в 80% из 30 кадров, игра сама переходит на верхнюю половину тела. Присед считается по опусканию плеч и носа, наклон — от виртуальной опоры под откалиброванными плечами. Судья может пройти игру сидя. В HUD горит бейдж `DESK MODE ACTIVE`.
+- **Голографический силуэт с `SYNC %`.** Пунктирный фантом целевой позы. Сходство считается косинусом по 5 векторам костей (позвоночник, плечи, предплечья) в метрических 3D-координатах MediaPipe, с конусом допуска для каждой кости. Янтарный, голубой или зелёный цвет, фиксация на 85% со звуком.
+- **Kinetic Vault Breach.** Две фазы: захват двумя ладонями с зарядкой 200→800 Гц, затем разведение рук. Стальные створки идут за руками через критически демпфированную пружину. Если отпустить, они захлопываются с отскоком и тряской экрана. Скрежет металла через notch-фильтр следует за прогрессом.
+- **Security Breach Dossier.** Финал оформлен как досье инцидента. В нём полоса критериев жюри, точность (косинус), средняя уверенность модели, время до миллисекунды, **Error Recovery Log**, покадровый лог движений, Top-10 с позывным и кнопка **COPY JURY AUDIT REPORT**, которая копирует структурированный JSON всей телеметрии раунда. В углу висит живое окно «CCTV» с игроком, а повтор запускается жестом «обе руки вверх».
 
-All browser video is processed locally. No video frames or pose data are sent to a server.
+---
 
-### Normalization and features
+## Надёжность запуска
 
-The detector returns 33 landmarks in normalized image space. The project mirrors that coordinate space to match the mirrored camera preview, then derives body-relative features:
+Если проект не запустится у жюри, за работоспособность ставится 0. Поэтому:
 
-- `shoulderWidth` and `torso` provide user-size normalization.
-- Right-hand lift is `(rightShoulder.y - rightWrist.y) / torso`.
-- Torso lean is the signed angle between shoulder-midpoint -> hip-midpoint and vertical.
-- Squat depth is the calibrated hip drop divided by torso height; knee flex uses the hip-knee-ankle angle on both sides.
-- Vault activation combines both wrist depth values, hand height symmetry, and wrist spread normalized by shoulder width.
-- Landmark visibility is averaged into a confidence score. Low-confidence frames cannot trigger an action.
+- **Ассеты свои.** WASM и модель берутся из своего бандла, при ошибке — с CDN. Проверено в Chrome: игра грузится, не делая ни одного запроса к CDN.
+- **GPU → CPU.** Если GPU недоступен при старте, детектор создаётся на CPU. Если WebGL-контекст теряется во время игры, после 3 ошибок подряд детектор пересоздаётся на CPU. Цикл кадров ставится до инференса, поэтому исключение его не останавливает.
+- **React StrictMode.** Камера корректно стартует в `npm run dev`; это проверено в headless Chrome с виртуальной камерой.
+- **Понятные сообщения:** камера запрещена, не найдена, **занята другим приложением** (Zoom/Meet), нет HTTPS, модель не отвечает. Для каждого случая есть кнопка повтора.
+- **Никакого провала по таймеру**: вместо него `OVERTIME`.
 
-Thresholds live in [`src/motion/gestureConfig.ts`](src/motion/gestureConfig.ts), not in the UI. The engine in [`src/motion/gestureEngine.ts`](src/motion/gestureEngine.ts) requires a sustained valid position before it emits success:
+---
 
-| Gesture | Hold | Key conditions |
-| --- | ---: | --- |
-| Right hand up | 620 ms | 42% torso lift above shoulder |
-| Lean left/right | 560 ms | 15 degree signed torso tilt |
-| Squat | 720 ms | 17% calibrated hip drop + both knees <= 154 degrees |
-| Hands forward | 800 ms | both hands forward, level, and shoulder-width apart |
+## Демо-протокол (≈90 секунд)
 
-The per-target temporal state machine is effectively `IDLE -> ATTEMPT -> VALIDATING -> SUCCESS -> COOLDOWN`. Releasing the posture resets validation. A short cooldown prevents a valid hold from producing duplicate actions.
+1. **START HEIST** → дождаться `BODY LOCKED`.
+2. Поднять правую руку, наклониться влево и вправо. Для демонстрации твиста можно сначала наклониться **не в ту сторону** и получить `WRONG DODGE DIRECTION`.
+3. DUCK UNDER LASER: сначала присесть наполовину. Луч искрит, стрелка показывает `LOWER BY N CM`. Затем пройти под лучом.
+4. Положить ладони на сканеры, развести руки, створки разъезжаются.
+5. В досье: Error Recovery Log, ввести позывной, нажать **COPY JURY AUDIT REPORT**.
 
-## Error mode
+---
 
-Error feedback is intentionally diagnostic, not a generic "gesture not recognized" message. After a sustained near-attempt, [`src/errors/errorAnalyzer.ts`](src/errors/errorAnalyzer.ts) selects an actionable reason and the Canvas highlights the relevant skeleton joints.
+## Очки и ранги
 
-| Target | Possible correction |
-| --- | --- |
-| Right hand up | `RIGHT HAND TOO LOW` - raise it above the shoulder |
-| Lean left/right | `TORSO TILT TOO SMALL` or `WRONG DODGE DIRECTION` - with current and target angle |
-| Squat | `HIPS TOO HIGH` or `BEND YOUR KNEES` - with depth or knee-angle target |
-| Hands forward | `LEFT/RIGHT HAND TOO FAR BACK` or `HANDS OUT OF SYNC` |
+За каждое движение: база 850, бонус за скорость реакции, бонус за точность и уверенность, комбо до ×5. Диагностированная ошибка: −120 и сброс комбо, один раз за диагноз в фазе. Исправление: +150, если уложиться в 1.5 с, дальше линейно до +30 к 6 с. В `OVERTIME` движения стоят ×0.5.
 
-The overlay includes an arrow, concrete body instruction, current versus target measurement, warning sound, and highlighted landmarks. A correction remains worth completing: it applies only a small score penalty and records correction time.
+Ранги: **GHOST INFILTRATOR** (без ошибок), **CYBER OPERATIVE** (все ошибки исправлены), **ROOKIE THIEF**.
 
-## Architecture
+---
 
-```text
-src/
-  audio/       Web Audio API cues with a no-audio fallback
-  errors/      Gesture-specific diagnostic hints
-  game/        Five-stage mission definition
-  hooks/       Camera lifecycle, requestAnimationFrame loop, Canvas skeleton
-  motion/      Geometry, thresholds, calibration, custom gesture engine
-  scoring/     Transparent score calculations and local leaderboard storage
-  types/       Pose, game, and feedback contracts
-  App.tsx      Screen-level state machine and HUD
-```
+## Мобильные устройства и доступность
 
-The camera hook isolates the expensive pose loop from React rendering. It runs inference at approximately 30 FPS via `requestAnimationFrame`, draws the skeleton on a Canvas, throttles UI-state updates, and closes MediaPipe plus all camera tracks on exit. It first tries the GPU delegate and falls back to CPU if WebGL is unavailable.
+- Вёрстка адаптирована под портретные экраны. Canvas-слои пересчитывают видимую область при `object-fit: cover`, поэтому подписи не уходят за край.
+- Учитывается `prefers-reduced-motion`: без вспышек и сканлайнов. Цвета контрастные, у полей есть подписи.
+- Звук синтезируется Web Audio после первого клика. Если звук недоступен, игра работает без него.
 
-## Scoring
+---
 
-Every completed motion earns a base score, a reaction bonus, a confidence/hold precision bonus, and a growing combo bonus (up to x5). A diagnosed mistake costs 120 points and resets the combo; a corrected movement still receives its full completion reward. The results screen derives motion style from accuracy and error count.
+## Правила хакатона
 
-## Demo protocol
+- Проект начат после старта хакатона: первый коммит 28.09, 11:45 (UTC+5), полная история в репозитории. Заранее подготовленных заготовок не использовалось.
+- Сторонние компоненты: MediaPipe Tasks Vision и модель `pose_landmarker_lite` (Apache-2.0), React, Vite. Нейросеть мы не обучали. Вся логика распознавания, диагностики и игры — своя.
 
-For a reliable jury demo, use a laptop in a well-lit room and frame the player from head to ankles:
+---
 
-1. Start the heist and wait for **BODY LOCKED**.
-2. Raise the right hand, then lean left and right.
-3. During **DUCK UNDER LASER**, first make a shallow squat to show the `HIPS TOO HIGH` correction; then squat lower.
-4. Hold both hands toward the camera for the vault-open animation and results screen.
+## Описание для формы сдачи
 
-The sequence deliberately makes real-time recognition, Canvas feedback, a concrete error correction, a completed scenario, and the local leaderboard visible in one run.
+> **MOTION: HEIST** — браузерная игра (направление A / GAME), где веб-камера заменяет джойстик. Игрок проходит ограбление сейфа из 5 движений: правая рука выше плеча (сканирование допуска), наклоны корпуса влево и вправо (уклонение от лазеров), нырок под физический лазерный луч и двухфазный взлом сейфа: ладони на сканеры, затем разведение рук, и стальные створки на экране разъезжаются синхронно с руками.
+>
+> MediaPipe Pose используется только для получения 33 точек тела. Распознавание — наша математика: нормализация по торсу и ширине плеч, истинные углы наклона, коллизия луча со скелетом, автомат удержаний с cooldown, косинусное сходство с эталонными позами, автоматический Desk Mode для игры сидя за ноутбуком.
+>
+> **Режим «ошибка»:** когда движение застопорилось (а не просто ещё не закончено), система называет конкретную проблему, показывает текущее и целевое значение и говорит, как исправить. Например: «LASER CONTACT — HEAD: LOWER BY 21 CM (CURRENT 27%, TARGET 70%)», «WRONG DODGE DIRECTION: 13° RIGHT → 15° LEFT, наклонитесь влево», «DON'T RELEASE — PULL WIDER». Подсказка видна прямо в сцене: искры на суставе, стрелка с сантиметрами, подсветка скелета. Исправление измеряется и вознаграждается, а в финальном досье есть лог «аномалия → инструкция → исправлено за N с».
 
-## Mobile and accessibility
+---
 
-- Responsive HUD handles narrow portrait screens; the camera fills the viewport and the five-step indicator remains in one row.
-- The app reports missing body tracking, camera denial, no camera, insecure context, and model initialization failure in plain language.
-- Important text uses high contrast; controls use accessible labels; `prefers-reduced-motion` reduces visual animation.
-- Audio uses browser-native Web Audio only after a user action and never blocks gameplay when unavailable.
+## Ограничения
 
-## Known limitations
-
-- The initial MediaPipe model and WASM runtime are loaded from Google/jsDelivr CDNs, so the first run needs an internet connection.
-- Forward-hand detection uses pose depth estimates; it performs best with both wrists visible, adequate front lighting, and the player facing the camera.
-- This is a single-player local experience. The leaderboard lives only in the current browser profile and has no backend sync.
+- Одна поза в кадре, одиночная игра. Лидерборд хранится только в этом браузере.
+- Нужен нормальный свет спереди. При сильном контровом свете уверенность модели падает, и игра честно пишет `MOVE INTO FRAME`.
+- В Desk Mode положение бёдер MediaPipe угадывает, поэтому наклон считается от виртуальной опоры, зафиксированной при калибровке. Если заметно пересесть, лучше перекалиброваться (REPLAY).

@@ -1,8 +1,9 @@
 import { useCallback, useRef } from 'react'
+import { playDossierBoot, playElectricZap, playLockBlip } from './soundEngine'
 
-export type SoundCue = 'click' | 'scan' | 'success' | 'error' | 'laser' | 'unlock' | 'countdown' | 'score'
+export type SoundCue = 'click' | 'scan' | 'success' | 'error' | 'laser' | 'unlock' | 'countdown' | 'score' | 'zap' | 'blip' | 'boot'
 
-const recipes: Record<SoundCue, [number, number, number, OscillatorType]> = {
+const recipes: Record<Exclude<SoundCue, 'zap' | 'blip' | 'boot'>, [number, number, number, OscillatorType]> = {
   click: [330, 0.045, 0.035, 'square'],
   scan: [210, 0.16, 0.045, 'sine'],
   success: [720, 0.12, 0.06, 'sine'],
@@ -15,14 +16,21 @@ const recipes: Record<SoundCue, [number, number, number, OscillatorType]> = {
 
 export const useHeistAudio = () => {
   const contextRef = useRef<AudioContext | null>(null)
-  const getContext = () => {
+  /** Shared context for voices that live longer than a cue (e.g. the vault sequence). */
+  const getContext = useCallback(() => {
     if (!contextRef.current) contextRef.current = new AudioContext()
     if (contextRef.current.state === 'suspended') void contextRef.current.resume()
     return contextRef.current
-  }
+  }, [])
   const play = useCallback((cue: SoundCue) => {
     try {
       const context = getContext()
+      if (cue === 'zap' || cue === 'blip' || cue === 'boot') {
+        if (cue === 'zap') playElectricZap(context)
+        else if (cue === 'blip') playLockBlip(context)
+        else playDossierBoot(context)
+        return
+      }
       const [frequency, duration, volume, type] = recipes[cue]
       const oscillator = context.createOscillator()
       const gain = context.createGain()
@@ -39,6 +47,6 @@ export const useHeistAudio = () => {
     } catch {
       // Audio is progressive enhancement; the heist stays playable without it.
     }
-  }, [])
-  return { play }
+  }, [getContext])
+  return { play, getContext }
 }

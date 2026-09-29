@@ -1,25 +1,31 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useHeistAudio } from './audio/useHeistAudio'
-import { MISSION, MISSION_DURATION_MS } from './game/mission'
+import { MISSION, MISSION_DURATION_MS, OVERTIME_LIMIT_MS, OVERTIME_SCORE_FACTOR } from './game/mission'
+import { HoloGuideCanvas, type HoloFeed } from './components/HoloGuideCanvas'
+import { VaultStage } from './game/stages/VaultStage'
+import { useLaserCanvas } from './hooks/useLaserCanvas'
 import { usePoseCamera } from './hooks/usePoseCamera'
+import { averageBaselines, BaselineManager } from './motion/baselineManager'
+import { bothHandsRaised, REPLAY_ARM_DELAY_MS, REPLAY_HOLD_MS } from './motion/menuGestures'
 import { canCalibrate, calibrationFrom, GestureEngine } from './motion/gestureEngine'
-import { getLeaderboard, saveScore } from './scoring/leaderboard'
-import { createStats, scoreMistake, scoreSuccess, styleFor } from './scoring/score'
+import { SecurityDossierScreen } from './components/ResultsScreen'
+import { getLeaderboard } from './scoring/leaderboardStorage'
+import { buildDossier, createStats, recoveryBonus, scoreMistake, scoreSuccess } from './scoring/scoringEngine'
+import { MissionRecorder } from './scoring/telemetryRecorder'
 import type { CalibrationBaseline, PoseFrame } from './types/pose'
-import type { GameSession, GestureSignal, LeaderboardEntry, MovementError, Screen } from './types/game'
+import type { GameSession, GestureSignal, LeaderboardEntry, MovementError, Screen, VaultReading } from './types/game'
+import type { DossierReport } from './types/scoring'
 import './styles.css'
 
+/** Counts down, then up with a "+" once the mission is in overtime. */
 const formatTime = (milliseconds: number) => {
-  const seconds = Math.max(0, Math.ceil(milliseconds / 1000))
-  return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`
+  const seconds = milliseconds >= 0 ? Math.ceil(milliseconds / 1000) : Math.floor(-milliseconds / 1000)
+  const clock = `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`
+  return milliseconds >= 0 ? clock : `+${clock}`
 }
 
-const averageBaseline = (samples: CalibrationBaseline[]): CalibrationBaseline => ({
-  hipY: samples.reduce((sum, item) => sum + item.hipY, 0) / samples.length,
-  torso: samples.reduce((sum, item) => sum + item.torso, 0) / samples.length,
-  shoulderWidth: samples.reduce((sum, item) => sum + item.shoulderWidth, 0) / samples.length,
-  capturedAt: Date.now(),
-})
+/** Flash + banner time between the vault breach and the debrief screen. */
+const VAULT_OUTRO_MS = 1200
 
 const initialSignal: GestureSignal = {
   gesture: 'RIGHT_HAND_UP', progress: 0, confidence: 0, valid: false, success: false, attempting: false,
@@ -32,17 +38,26 @@ const scoreAccuracy = (session: GameSession) => session.stats.successfulActions
 function App() {
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const laserCanvasRef = useRef<HTMLCanvasElement>(null)
+  const holoFeedRef = useRef<HoloFeed | null>(null)
+  const vaultFeedRef = useRef<VaultReading | null>(null)
   const screenRef = useRef<Screen>('landing')
   const frameRef = useRef<PoseFrame | null>(null)
   const gameRef = useRef<GameSession | null>(null)
   const baselineRef = useRef<CalibrationBaseline | null>(null)
   const engineRef = useRef(new GestureEngine())
+  const baselinesRef = useRef(new BaselineManager())
+  const recorderRef = useRef(new MissionRecorder())
   const calibrationSamplesRef = useRef<CalibrationBaseline[]>([])
   const lastUiFrameRef = useRef(0)
-  const lastErrorKeyRef = useRef<string | null>(null)
+  /** Diagnoses already penalized in the current phase: each costs points once, even if it recurs. */
+  const penalizedRef = useRef(new Set<string>())
   const correctionStartedRef = useRef<number | null>(null)
   const resolveMotionRef = useRef<(signal: GestureSignal) => void>(() => undefined)
   const calibrateFrameRef = useRef<(frame: PoseFrame | null) => void>(() => undefined)
+  const replayFrameRef = useRef<(frame: PoseFrame | null) => void>(() => undefined)
+  const resultsShownAtRef = useRef(0)
+  const replayRaisedSinceRef = useRef<number | null>(null)
   const finishedRef = useRef(false)
 
   const [screen, setScreen] = useState<Screen>('landing')
@@ -57,8 +72,14 @@ function App() {
   const [toast, setToast] = useState<string | null>(null)
   const [warning, setWarning] = useState<string | null>(null)
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>(() => getLeaderboard())
-  const [lastEntry, setLastEntry] = useState<LeaderboardEntry | null>(null)
-  const { play } = useHeistAudio()
+  const [dossier, setDossier] = useState<DossierReport | null>(null)
+  const [replayProgress, setReplayProgress] = useState(0)
+  const { play, getContext: getAudioContext } = useHeistAudio()
+  const playZap = useCallback(() => play('zap'), [play])
+  const playBlip = useCallback(() => play('blip'), [play])
+  const playBoot = useCallback(() => play('boot'), [play])
+  const playConfirm = useCallback(() => play('score'), [play])
+  const laser = useLaserCanvas({ canvasRef: laserCanvasRef, videoRef, active: screen === 'playing', onBreach: playZap })
 
   useEffect(() => { screenRef.current = screen }, [screen])
   useEffect(() => { gameRef.current = game }, [game])
@@ -66,21 +87,41 @@ function App() {
   const onPoseFrame = useCallback((frame: PoseFrame | null) => {
     frameRef.current = frame
     if (screenRef.current === 'calibrating') calibrateFrameRef.current(frame)
+    if (screenRef.current === 'results') replayFrameRef.current(frame)
     if (screenRef.current === 'playing') {
+      holoFeedRef.current = null
       const activeGame = gameRef.current
       if (!activeGame || !baselineRef.current) return
       const action = MISSION[activeGame.phase]
       if (!action) return
-      const nextSignal = engineRef.current.update(action.gesture, frame, baselineRef.current)
-      if ((frame?.timestamp ?? performance.now()) - lastUiFrameRef.current > 85) {
+      // A desk <-> full-body switch changes the body's scale on screen; hold judgement until it is re-locked.
+      const baseline = frame ? baselinesRef.current.resolve(frame) : baselineRef.current
+      let nextSignal: GestureSignal
+      if (!baseline) {
+        engineRef.current.reset(action.gesture)
+        nextSignal = { gesture: action.gesture, progress: 0, confidence: 0, valid: false, success: false, attempting: false, recalibrating: true }
+      } else {
+        nextSignal = engineRef.current.update(action.gesture, frame, baseline)
+        // The vault stage draws its own scanners and doors instead of a ghost.
+        if (frame && action.gesture !== 'VAULT_BREACH') holoFeedRef.current = { frame, baseline, gesture: action.gesture, laser: nextSignal.metrics?.laser }
+        if (nextSignal.vault) vaultFeedRef.current = nextSignal.vault
+      }
+      if (frame) recorderRef.current.recordFrame(nextSignal, frame.timestamp)
+      laser.update(nextSignal.metrics?.laser ?? null, nextSignal.valid ? nextSignal.progress : 0)
+      if (nextSignal.success && nextSignal.metrics?.laser) laser.clear()
+      const uiTick = (frame?.timestamp ?? performance.now()) - lastUiFrameRef.current > 85
+      if (uiTick) {
         lastUiFrameRef.current = frame?.timestamp ?? performance.now()
         setSignal(nextSignal)
       }
       if (nextSignal.error) {
-        const key = `${activeGame.phase}:${nextSignal.error.title}`
-        if (key !== lastErrorKeyRef.current) {
-          lastErrorKeyRef.current = key
+        const title = nextSignal.error.title
+        // A known diagnosis only refreshes the live numbers; it is never penalized twice.
+        if (penalizedRef.current.has(title) && uiTick) setMovementError(nextSignal.error)
+        if (!penalizedRef.current.has(title)) {
+          penalizedRef.current.add(title)
           correctionStartedRef.current ??= performance.now()
+          recorderRef.current.recordAnomaly(nextSignal.error, performance.now())
           setMovementError(nextSignal.error)
           const penalized = scoreMistake(activeGame.score, activeGame.stats)
           const updated = { ...activeGame, ...penalized }
@@ -91,7 +132,7 @@ function App() {
       }
       if (nextSignal.success) resolveMotionRef.current(nextSignal)
     }
-  }, [play])
+  }, [laser, play])
 
   const camera = usePoseCamera({
     videoRef,
@@ -104,55 +145,55 @@ function App() {
   const finishMission = useCallback((session: GameSession) => {
     if (finishedRef.current) return
     finishedRef.current = true
-    const accuracy = scoreAccuracy(session)
-    const elapsed = session.durationMs - Math.max(0, session.durationMs - (Date.now() - session.startedAt))
-    const entry: LeaderboardEntry = {
-      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      nickname: session.playerName,
-      score: session.score,
-      accuracy,
-      time: Math.round(elapsed / 1000),
-      date: new Date().toLocaleDateString(),
-      style: styleFor(accuracy, session.stats.mistakes),
-    }
-    const nextLeaderboard = saveScore(entry)
-    setLeaderboard(nextLeaderboard)
-    setLastEntry(entry)
+    const breached = session.phase >= MISSION.length
+    const telemetry = recorderRef.current.finish(performance.now(), breached ? 'breached' : 'timeout', session.score, session.stats.mistakes)
+    setDossier(buildDossier(telemetry, MISSION))
+    // The camera stays on: the debrief shows it as a CCTV feed and watches for the replay gesture.
+    resultsShownAtRef.current = performance.now()
+    replayRaisedSinceRef.current = null
+    setReplayProgress(0)
     setScreen('results')
-    setToast(session.phase >= MISSION.length ? 'VAULT OPENED' : 'MISSION TIME EXPIRED')
-    play(session.phase >= MISSION.length ? 'unlock' : 'error')
-    stopCamera()
-  }, [play, stopCamera])
+    setToast(null)
+    if (!breached) play('error')
+  }, [play])
 
   const resolveMotion = useCallback((motionSignal: GestureSignal) => {
     const activeGame = gameRef.current
     if (!activeGame) return
     const phaseElapsed = performance.now() - activeGame.phaseStartedAt
     const scored = scoreSuccess(activeGame.score, activeGame.stats, motionSignal, phaseElapsed)
+    const overtime = Date.now() - activeGame.startedAt > activeGame.durationMs
+    const earned = overtime ? Math.round(scored.earned * OVERTIME_SCORE_FACTOR) : scored.earned
     const correctedFor = correctionStartedRef.current ? Math.max(0, performance.now() - correctionStartedRef.current) : 0
     const nextStats = correctionStartedRef.current
       ? { ...scored.stats, corrections: scored.stats.corrections + 1, correctionMs: scored.stats.correctionMs + correctedFor }
       : scored.stats
+    const bonus = correctionStartedRef.current ? recoveryBonus(correctedFor) : 0
+    const now = performance.now()
+    recorderRef.current.completePhase(now, earned, bonus)
     const nextPhase = activeGame.phase + 1
+    if (nextPhase < MISSION.length) recorderRef.current.beginPhase(nextPhase, MISSION[nextPhase], now)
     const updated: GameSession = {
       ...activeGame,
-      score: scored.score,
+      score: activeGame.score + earned + bonus,
       stats: nextStats,
       phase: nextPhase,
-      phaseStartedAt: performance.now(),
+      phaseStartedAt: now,
     }
     gameRef.current = updated
     setGame(updated)
-    setToast(`+${scored.earned} MOTION CONFIRMED`)
+    const overtimeTag = overtime ? ' · OVERTIME ×0.5' : ''
+    setToast(bonus ? `+${earned} MOTION CONFIRMED · +${bonus} RECOVERY${overtimeTag}` : `+${earned} MOTION CONFIRMED${overtimeTag}`)
     setMovementError(null)
     setWarning(null)
     setSignal({ ...motionSignal, progress: 1 })
-    lastErrorKeyRef.current = null
+    penalizedRef.current.clear()
     correctionStartedRef.current = null
     engineRef.current.reset(nextPhase < MISSION.length ? MISSION[nextPhase].gesture : null)
-    play(nextPhase === MISSION.length ? 'unlock' : 'success')
+    // The vault stage plays its own breach strike for the finale.
+    if (nextPhase < MISSION.length) play('success')
     window.setTimeout(() => setToast(null), 1600)
-    if (nextPhase >= MISSION.length) window.setTimeout(() => finishMission(updated), 1100)
+    if (nextPhase >= MISSION.length) window.setTimeout(() => finishMission(updated), VAULT_OUTRO_MS)
   }, [finishMission, play])
   resolveMotionRef.current = resolveMotion
 
@@ -166,12 +207,15 @@ function App() {
     }
     const baseline = calibrationFrom(frame)
     if (!baseline || calibrationSamplesRef.current.length >= 18) return
+    // The player switched between desk and full-body framing mid-calibration: start over at the new distance.
+    if (calibrationSamplesRef.current[0] && calibrationSamplesRef.current[0].mode !== baseline.mode) calibrationSamplesRef.current = []
     calibrationSamplesRef.current.push(baseline)
     const progress = calibrationSamplesRef.current.length / 18
     setCalibrationProgress(progress)
     if (progress >= 1) {
-      const averaged = averageBaseline(calibrationSamplesRef.current)
+      const averaged = averageBaselines(calibrationSamplesRef.current)
       baselineRef.current = averaged
+      baselinesRef.current.seed(averaged)
       setToast('BODY LOCKED')
       play('scan')
       setScreen('briefing')
@@ -193,9 +237,13 @@ function App() {
       baseline,
     }
     finishedRef.current = false
-    lastErrorKeyRef.current = null
+    penalizedRef.current.clear()
     correctionStartedRef.current = null
     engineRef.current.reset(MISSION[0].gesture)
+    recorderRef.current.start(session.playerName, session.phaseStartedAt, session.durationMs)
+    recorderRef.current.beginPhase(0, MISSION[0], session.phaseStartedAt)
+    vaultFeedRef.current = null
+    laser.reset()
     gameRef.current = session
     setGame(session)
     setRemainingMs(session.durationMs)
@@ -206,7 +254,7 @@ function App() {
     setScreen('playing')
     play('scan')
     window.setTimeout(() => setToast(null), 1400)
-  }, [demoMode, play, playerName])
+  }, [demoMode, laser, play, playerName])
 
   useEffect(() => {
     if (screen !== 'briefing') return
@@ -229,23 +277,25 @@ function App() {
       const session = gameRef.current
       if (!session) return
       const elapsed = Date.now() - session.startedAt
-      const remaining = Math.max(0, session.durationMs - elapsed)
+      const remaining = session.durationMs - elapsed
       setRemainingMs(remaining)
       const phaseElapsed = performance.now() - session.phaseStartedAt
-      if (phaseElapsed > 12_000 && Math.floor(phaseElapsed / 4000) > 2) {
+      if (remaining < 0) {
+        setWarning('OVERTIME — the vault is still reachable. Moves now score ×0.5.')
+      } else if (phaseElapsed > 12_000 && Math.floor(phaseElapsed / 4000) > 2) {
         setWarning('MISSION WARNING — take your time. The motion target is still active.')
       }
-      if (remaining === 0) finishMission(session)
+      // Only an abandoned session ends without the vault.
+      if (-remaining > OVERTIME_LIMIT_MS && session.phase < MISSION.length) finishMission(session)
     }, 200)
     return () => window.clearInterval(timer)
   }, [finishMission, screen])
 
   const startHeist = async () => {
-    // A retry cancels an older permission request that may still be pending.
-    stopCamera()
     play('click')
     calibrationSamplesRef.current = []
     baselineRef.current = null
+    baselinesRef.current.reset()
     setCalibrationProgress(0)
     setMovementError(null)
     setToast(null)
@@ -253,26 +303,41 @@ function App() {
     await startCamera()
   }
 
-  const restart = async () => {
+  const exitToLobby = () => {
     stopCamera()
-    setLastEntry(null)
+    setDossier(null)
     setScreen('landing')
   }
 
+  replayFrameRef.current = (frame) => {
+    const now = performance.now()
+    const raised = frame !== null && now - resultsShownAtRef.current > REPLAY_ARM_DELAY_MS && bothHandsRaised(frame)
+    if (!raised) {
+      if (replayRaisedSinceRef.current !== null) {
+        replayRaisedSinceRef.current = null
+        setReplayProgress(0)
+      }
+      return
+    }
+    replayRaisedSinceRef.current ??= now
+    const progress = Math.min(1, (now - replayRaisedSinceRef.current) / REPLAY_HOLD_MS)
+    setReplayProgress(progress)
+    if (progress >= 1) {
+      replayRaisedSinceRef.current = null
+      setReplayProgress(0)
+      void startHeist()
+    }
+  }
+
+  // Leaving the mission/debrief flow releases the camera (and its indicator light).
+  useEffect(() => {
+    if (screen === 'landing' || screen === 'leaderboard') stopCamera()
+  }, [screen, stopCamera])
+
   const currentAction = game && game.phase < MISSION.length ? MISSION[game.phase] : MISSION[MISSION.length - 1]
   const accuracy = game ? scoreAccuracy(game) : 0
-  const isNewHighScore = lastEntry !== null && leaderboard[0]?.id === lastEntry.id
   const cameraTag = camera.status === 'tracking' && frameRef.current ? 'BODY DETECTED' : camera.status === 'tracking' ? 'MOVE INTO FRAME' : camera.message
   const motionProgress = Math.round(signal.progress * 100)
-  const calibrationTitle = camera.status === 'tracking'
-    ? calibrationProgress < .2 ? 'MOVE INTO FRAME' : 'HOLD YOUR POSITION'
-    : camera.status === 'requesting'
-      ? 'ALLOW CAMERA ACCESS'
-      : camera.status === 'initializing'
-        ? 'LOADING MOTION SYSTEM'
-        : camera.status === 'denied' || camera.status === 'error' || camera.status === 'unsupported'
-          ? 'CAMERA ACCESS REQUIRED'
-          : 'INITIALIZING CAMERA'
 
   return (
     <main className={`app screen-${screen}`}>
@@ -303,27 +368,43 @@ function App() {
             <span>NO KEYBOARD</span><i /> <span>NO MOUSE</span><i /> <span>JUST MOVE</span>
           </div>
           <div className="gesture-strip" aria-label="Mission gestures">
-            {['RAISE', 'LEAN L', 'LEAN R', 'SQUAT', 'HANDS FWD'].map((item, index) => <span key={item}><b>0{index + 1}</b>{item}</span>)}
+            {['RAISE', 'LEAN L', 'LEAN R', 'SQUAT', 'BREACH'].map((item, index) => <span key={item}><b>0{index + 1}</b>{item}</span>)}
           </div>
           <button className="quiet-button leaderboard-launch" onClick={() => setScreen('leaderboard')}>LOCAL LEADERBOARD ↗</button>
         </section>
       )}
 
-      {(screen === 'calibrating' || screen === 'briefing' || screen === 'playing') && (
-        <section className="mission-view">
-          <div className="camera-stage">
-            <video ref={videoRef} className="camera-video" muted playsInline />
-            <canvas ref={canvasRef} className="pose-canvas" />
-            <div className="camera-shade" />
-            <div className="scanline" />
-            {screen === 'playing' && <div className={`laser laser-${game?.phase ?? 0}`} />}
+      {/* One persistent stage: the same <video> survives from calibration into the debrief (CCTV). */}
+      {(screen === 'calibrating' || screen === 'briefing' || screen === 'playing' || (screen === 'results' && camera.status === 'tracking')) && (
+        <div className={`camera-stage ${screen === 'results' ? 'cctv' : ''}`}>
+          <video ref={videoRef} className="camera-video" muted playsInline />
+          {/* Before the skeleton layer so the player's own bones always draw over the hologram. */}
+          <HoloGuideCanvas videoRef={videoRef} feedRef={holoFeedRef} active={screen === 'playing'} onLock={playBlip} />
+          <canvas ref={canvasRef} className="pose-canvas" />
+          <div className="camera-shade" />
+          <div className="scanline" />
+          <canvas ref={laserCanvasRef} className="laser-canvas" />
+          <div className={`desk-badge ${camera.trackingMode === 'desk' && camera.status === 'tracking' ? 'visible' : ''}`} role="status" aria-hidden={camera.trackingMode !== 'desk'}>
+            <span className="desk-badge-dot" /><b>DESK MODE ACTIVE</b><i /><span>UPPER-BODY TRACKING</span>
           </div>
+          {screen === 'playing' && currentAction.gesture !== 'SQUAT' && currentAction.gesture !== 'VAULT_BREACH' && <div className={`laser laser-${game?.phase ?? 0}`} />}
+          {screen === 'results' && (
+            <div className="cctv-overlay" aria-live="polite">
+              <span className="cctv-tag"><i /> CCTV 03 · OPERATIVE LIVE</span>
+              <span className="cctv-replay">{replayProgress > 0 ? `REPLAY ${Math.round(replayProgress * 100)}%` : 'RAISE BOTH HANDS TO REPLAY'}</span>
+              <span className="cctv-meter"><b style={{ width: `${replayProgress * 100}%` }} /></span>
+            </div>
+          )}
+        </div>
+      )}
 
+      {(screen === 'calibrating' || screen === 'briefing' || screen === 'playing') && (
+        <section className={`mission-view ${screen === 'playing' && game && game.phase >= MISSION.length ? 'vault-exit' : ''}`}>
           {screen === 'calibrating' && (
             <div className="calibration-overlay">
               <p className="eyebrow"><span className="live-dot" /> CAMERA CALIBRATION</p>
-              <h2>{calibrationTitle}</h2>
-              <p>{camera.status === 'tracking' ? 'Stand back until your shoulders, hips and knees are visible.' : camera.message}</p>
+              <h2>{camera.status === 'tracking' ? calibrationProgress < .2 ? 'MOVE INTO FRAME' : 'HOLD YOUR POSITION' : 'INITIALIZING CAMERA'}</h2>
+              <p>{camera.status !== 'tracking' ? camera.message : camera.trackingMode === 'desk' ? 'Desk mode: sit upright with your head and shoulders in frame.' : 'Stand back until your shoulders, hips and knees are visible.'}</p>
               <div className="calibration-bar"><span style={{ width: `${calibrationProgress * 100}%` }} /></div>
               <div className="calibration-readout"><span>{Math.round(calibrationProgress * 100)}% BODY MAP</span><span>{camera.fps ? `${camera.fps} FPS` : 'LINKING'}</span></div>
               {(camera.status === 'denied' || camera.status === 'error' || camera.status === 'unsupported') && <button className="primary-button compact" onClick={() => void startHeist()}>RETRY CAMERA</button>}
@@ -344,16 +425,17 @@ function App() {
             <>
               <header className="hud-top">
                 <div><span>MISSION 01</span><b>VAULT INFILTRATION</b></div>
-                <div className="time-readout"><span>TIME</span><b className={remainingMs < 20_000 ? 'urgent' : ''}>{formatTime(remainingMs)}</b></div>
+                <div className="time-readout"><span>{remainingMs < 0 ? 'OVERTIME' : 'TIME'}</span><b className={remainingMs < 20_000 ? 'urgent' : ''}>{formatTime(remainingMs)}</b></div>
                 <div className="score-readout"><span>SCORE</span><b>{game.score.toLocaleString()}</b></div>
               </header>
               <aside className="camera-status"><span className={frameRef.current ? 'live-dot' : 'warning-dot'} /> <b>CAMERA</b> {cameraTag}<small>{camera.fps || '--'} FPS</small></aside>
-              <section className="objective-card">
+              {currentAction.gesture === 'VAULT_BREACH' && <VaultStage videoRef={videoRef} feedRef={vaultFeedRef} getAudioContext={getAudioContext} />}
+              <section className={`objective-card ${currentAction.gesture === 'VAULT_BREACH' ? 'vault-docked' : ''}`}>
                 <span className="phase">{currentAction.scene}</span>
                 <h2>{currentAction.objective}</h2>
-                <p>{currentAction.hint}</p>
+                <p>{camera.trackingMode === 'desk' && currentAction.deskHint ? currentAction.deskHint : currentAction.hint}</p>
                 <div className="hold-meter"><span style={{ width: `${motionProgress}%` }} /></div>
-                <div className="meter-label"><span>{signal.valid ? 'VALIDATING HOLD' : signal.attempting ? 'MOTION DETECTED' : 'WAITING FOR MOTION'}</span><b>{motionProgress}%</b></div>
+                <div className="meter-label"><span>{signal.recalibrating ? 'RE-LOCKING BODY MAP' : signal.valid ? 'VALIDATING HOLD' : signal.attempting ? 'MOTION DETECTED' : 'WAITING FOR MOTION'}</span><b>{motionProgress}%</b></div>
               </section>
               <aside className="mission-rail">
                 {MISSION.map((action, index) => <div key={action.gesture} className={index < game.phase ? 'done' : index === game.phase ? 'active' : ''}><b>0{index + 1}</b><span>{action.objective}</span></div>)}
@@ -367,35 +449,30 @@ function App() {
         </section>
       )}
 
-      {screen === 'results' && lastEntry && (
-        <section className="result-screen panel-frame">
-          <p className="eyebrow"><span className="live-dot" /> MISSION DEBRIEF / SECURED</p>
-          <h1>HEIST <em>COMPLETE</em></h1>
-          {isNewHighScore && <div className="high-score">✦ NEW HIGH SCORE ✦</div>}
-          <div className="final-score"><span>FINAL SCORE</span><strong>{lastEntry.score.toLocaleString()}</strong></div>
-          <div className="stats-grid">
-            <Stat label="MOTION ACCURACY" value={`${lastEntry.accuracy}%`} />
-            <Stat label="SUCCESSFUL ACTIONS" value={`${game?.stats.successfulActions ?? 0}/5`} />
-            <Stat label="MISTAKES" value={String(game?.stats.mistakes ?? 0)} />
-            <Stat label="CORRECTION TIME" value={`${((game?.stats.correctionMs ?? 0) / 1000).toFixed(1)}s`} />
-            <Stat label="TIME USED" value={`${lastEntry.time}s`} />
-            <Stat label="MOTION STYLE" value={lastEntry.style} accent />
-          </div>
-          <div className="result-actions"><button className="primary-button" onClick={() => void restart()}>PLAY AGAIN <b>↻</b></button><button className="secondary-button" onClick={() => setScreen('leaderboard')}>LEADERBOARD</button></div>
-        </section>
+      {screen === 'results' && dossier && (
+        <SecurityDossierScreen
+          report={dossier}
+          defaultCallsign={playerName}
+          onReplay={() => void startHeist()}
+          replayHint={camera.status === 'tracking' ? 'OR RAISE BOTH HANDS FOR 1.2 S' : undefined}
+          onExit={exitToLobby}
+          onLeaderboardChange={setLeaderboard}
+          onBoot={playBoot}
+          onConfirm={playConfirm}
+        />
       )}
 
       {screen === 'leaderboard' && (
         <section className="leaderboard-screen panel-frame">
-          <button className="back-button" onClick={() => setScreen(lastEntry ? 'results' : 'landing')}>← BACK</button>
+          <button className="back-button" onClick={() => setScreen(dossier ? 'results' : 'landing')}>← BACK</button>
           <p className="eyebrow"><span className="live-dot" /> LOCAL VAULT RECORDS</p>
           <h1>LEADER<span>BOARD</span></h1>
           <p className="board-note">Stored only in this browser. Top ten infiltrations.</p>
           <div className="score-table">
             <div className="table-head"><span>RANK</span><span>OPERATIVE</span><span>STYLE</span><span>ACCURACY</span><span>SCORE</span></div>
-            {leaderboard.length ? leaderboard.map((entry, index) => <div className={`table-row ${entry.id === lastEntry?.id ? 'latest' : ''}`} key={entry.id}><span>0{index + 1}</span><b>{entry.nickname}</b><span>{entry.style}</span><span>{entry.accuracy}%</span><strong>{entry.score.toLocaleString()}</strong></div>) : <p className="empty-board">No records yet. Your vault is waiting.</p>}
+            {leaderboard.length ? leaderboard.map((entry, index) => <div className="table-row" key={entry.id}><span>0{index + 1}</span><b>{entry.nickname}</b><span>{entry.style}</span><span>{entry.accuracy}%</span><strong>{entry.score.toLocaleString()}</strong></div>) : <p className="empty-board">No records yet. Your vault is waiting.</p>}
           </div>
-          {!lastEntry && <button className="primary-button compact" onClick={() => setScreen('landing')}>START A HEIST</button>}
+          {!dossier && <button className="primary-button compact" onClick={() => setScreen('landing')}>START A HEIST</button>}
         </section>
       )}
     </main>
@@ -409,10 +486,6 @@ function ErrorOverlay({ error }: { error: MovementError }) {
     <div className="error-correction"><strong>{error.arrow}</strong><span>{error.correction}</span></div>
     <div className="error-measures"><span>{error.current}</span><i /><b>{error.target}</b></div>
   </aside>
-}
-
-function Stat({ label, value, accent = false }: { label: string; value: string; accent?: boolean }) {
-  return <div className={accent ? 'stat accent-stat' : 'stat'}><span>{label}</span><b>{value}</b></div>
 }
 
 export default App

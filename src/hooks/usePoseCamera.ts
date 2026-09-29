@@ -1,6 +1,9 @@
 import { FilesetResolver, PoseLandmarker } from '@mediapipe/tasks-vision'
+import wasmLoaderUrl from '@mediapipe/tasks-vision/vision_wasm_internal.js?url'
+import wasmBinaryUrl from '@mediapipe/tasks-vision/vision_wasm_internal.wasm?url'
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
-import type { Landmark, PoseFrame } from '../types/pose'
+import { LowerBodyTracker } from '../motion/trackingMode'
+import type { Landmark, PoseFrame, TrackingMode } from '../types/pose'
 
 export type CameraStatus = 'idle' | 'requesting' | 'initializing' | 'tracking' | 'denied' | 'unsupported' | 'error'
 
@@ -8,6 +11,7 @@ interface CameraState {
   status: CameraStatus
   message: string
   fps: number
+  trackingMode: TrackingMode
 }
 
 interface UsePoseCameraOptions {
@@ -17,16 +21,53 @@ interface UsePoseCameraOptions {
   focusPoints?: number[]
 }
 
-const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm'
-const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task'
-const CAMERA_PERMISSION_TIMEOUT_MS = 8_000
+const CDN_WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm'
+const CDN_MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task'
+const LOCAL_MODEL_URL = `${import.meta.env.BASE_URL}models/pose_landmarker_lite.task`
 
-class CameraPermissionTimeoutError extends Error {
-  constructor() {
-    super('Camera permission request timed out.')
-    this.name = 'CameraPermissionTimeoutError'
+type Delegate = 'GPU' | 'CPU'
+/** The package declares WasmFileset but does not export it. */
+type WasmFileset = Awaited<ReturnType<typeof FilesetResolver.forVisionTasks>>
+
+/**
+ * Self-hosted first (bundled WASM + model in /public), CDN second: the demo
+ * must start even on a venue network that blocks jsdelivr or Google Storage.
+ */
+const ASSET_SOURCES: Array<{ fileset: () => Promise<WasmFileset>; model: string }> = [
+  { fileset: async () => ({ wasmLoaderPath: wasmLoaderUrl, wasmBinaryPath: wasmBinaryUrl }), model: LOCAL_MODEL_URL },
+  { fileset: () => FilesetResolver.forVisionTasks(CDN_WASM_URL), model: CDN_MODEL_URL },
+]
+
+const createDetector = async (delegates: Delegate[]) => {
+  let lastError: unknown = new Error('No pose model source available.')
+  for (const source of ASSET_SOURCES) {
+    let fileset: WasmFileset
+    try {
+      fileset = await source.fileset()
+    } catch (error) {
+      lastError = error
+      continue
+    }
+    for (const delegate of delegates) {
+      try {
+        return await PoseLandmarker.createFromOptions(fileset, {
+          baseOptions: { modelAssetPath: source.model, delegate },
+          runningMode: 'VIDEO',
+          numPoses: 1,
+          minPoseDetectionConfidence: 0.55,
+          minPosePresenceConfidence: 0.55,
+          minTrackingConfidence: 0.55,
+        })
+      } catch (error) {
+        lastError = error
+      }
+    }
   }
+  throw lastError
 }
+
+/** Consecutive inference failures (e.g. a lost WebGL context) before rebuilding on the CPU. */
+const MAX_INFERENCE_FAILURES = 3
 
 const CONNECTIONS: Array<[number, number]> = [
   [11, 12], [11, 13], [13, 15], [12, 14], [14, 16], [11, 23], [12, 24], [23, 24],
@@ -67,14 +108,22 @@ const drawPose = (canvas: HTMLCanvasElement, landmarks: Landmark[] | undefined, 
   context.shadowBlur = 0
 }
 
-const snapshot = (landmarks: Landmark[], worldLandmarks: Landmark[] | undefined, timestamp: number): PoseFrame => ({
+const snapshot = (
+  landmarks: Landmark[],
+  worldLandmarks: Landmark[] | undefined,
+  timestamp: number,
+  trackingMode: TrackingMode,
+  aspect: number,
+): PoseFrame => ({
   landmarks: landmarks.map((point) => ({ ...point })),
   worldLandmarks: worldLandmarks?.map((point) => ({ ...point })),
   timestamp,
+  trackingMode,
+  aspect,
 })
 
 export const usePoseCamera = ({ videoRef, canvasRef, onFrame, focusPoints = [] }: UsePoseCameraOptions) => {
-  const [state, setState] = useState<CameraState>({ status: 'idle', message: 'Camera standing by.', fps: 0 })
+  const [state, setState] = useState<CameraState>({ status: 'idle', message: 'Camera standing by.', fps: 0, trackingMode: 'full' })
   const detectorRef = useRef<PoseLandmarker | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const animationRef = useRef<number | null>(null)
@@ -84,14 +133,14 @@ export const usePoseCamera = ({ videoRef, canvasRef, onFrame, focusPoints = [] }
   const mountedRef = useRef(true)
   const fpsFramesRef = useRef(0)
   const fpsStartedRef = useRef(0)
-  const requestIdRef = useRef(0)
+  const trackerRef = useRef(new LowerBodyTracker())
+  const failuresRef = useRef(0)
+  const recoveringRef = useRef(false)
 
   useEffect(() => { onFrameRef.current = onFrame }, [onFrame])
   useEffect(() => { focusRef.current = focusPoints }, [focusPoints])
 
   const stop = useCallback(() => {
-    // Any late approval from a dismissed browser permission prompt is ignored.
-    requestIdRef.current += 1
     if (animationRef.current !== null) cancelAnimationFrame(animationRef.current)
     animationRef.current = null
     detectorRef.current?.close()
@@ -101,44 +150,28 @@ export const usePoseCamera = ({ videoRef, canvasRef, onFrame, focusPoints = [] }
     const video = videoRef.current
     if (video) video.srcObject = null
     onFrameRef.current(null)
-    if (mountedRef.current) setState({ status: 'idle', message: 'Camera paused.', fps: 0 })
+    trackerRef.current.reset()
+    if (mountedRef.current) setState({ status: 'idle', message: 'Camera paused.', fps: 0, trackingMode: 'full' })
   }, [videoRef])
 
   const start = useCallback(async () => {
     if (detectorRef.current || streamRef.current) return
     if (!navigator.mediaDevices?.getUserMedia) {
-      setState({ status: 'unsupported', message: 'This browser cannot access a camera.', fps: 0 })
+      setState((current) => ({ ...current, status: 'unsupported', message: 'This browser cannot access a camera.', fps: 0 }))
       return
     }
     if (!window.isSecureContext && location.hostname !== 'localhost') {
-      setState({ status: 'unsupported', message: 'Camera requires HTTPS. Open the secure deployment.', fps: 0 })
+      setState((current) => ({ ...current, status: 'unsupported', message: 'Camera requires HTTPS. Open the secure deployment.', fps: 0 }))
       return
     }
 
-    const requestId = ++requestIdRef.current
-    let permissionTimer: number | undefined
     try {
-      setState({
-        status: 'requesting',
-        message: 'Click Allow in the browser camera prompt. If it is hidden, use the camera icon beside the address bar.',
-        fps: 0,
-      })
-      const mediaRequest = navigator.mediaDevices.getUserMedia({
+      setState((current) => ({ ...current, status: 'requesting', message: 'Requesting camera access…', fps: 0 }))
+      const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } },
         audio: false,
       })
-      // Browsers may leave getUserMedia pending indefinitely while their native
-      // dialog is ignored. A late approval is stopped after a timeout/retry.
-      void mediaRequest.then((lateStream) => {
-        if (!mountedRef.current || requestIdRef.current !== requestId) lateStream.getTracks().forEach((track) => track.stop())
-      }).catch(() => undefined)
-      const timeout = new Promise<never>((_, reject) => {
-        permissionTimer = window.setTimeout(() => reject(new CameraPermissionTimeoutError()), CAMERA_PERMISSION_TIMEOUT_MS)
-      })
-      const stream = await Promise.race([mediaRequest, timeout])
-      window.clearTimeout(permissionTimer)
-      permissionTimer = undefined
-      if (!mountedRef.current || requestIdRef.current !== requestId) {
+      if (!mountedRef.current) {
         stream.getTracks().forEach((track) => track.stop())
         return
       }
@@ -149,38 +182,45 @@ export const usePoseCamera = ({ videoRef, canvasRef, onFrame, focusPoints = [] }
       await new Promise<void>((resolve) => { video.onloadedmetadata = () => resolve() })
       await video.play()
 
-      setState({ status: 'initializing', message: 'Loading motion intelligence…', fps: 0 })
-      const vision = await FilesetResolver.forVisionTasks(WASM_URL)
-      try {
-        detectorRef.current = await PoseLandmarker.createFromOptions(vision, {
-          baseOptions: { modelAssetPath: MODEL_URL, delegate: 'GPU' },
-          runningMode: 'VIDEO',
-          numPoses: 1,
-          minPoseDetectionConfidence: 0.55,
-          minPosePresenceConfidence: 0.55,
-          minTrackingConfidence: 0.55,
-        })
-      } catch {
-        detectorRef.current = await PoseLandmarker.createFromOptions(vision, {
-          baseOptions: { modelAssetPath: MODEL_URL, delegate: 'CPU' },
-          runningMode: 'VIDEO',
-          numPoses: 1,
-          minPoseDetectionConfidence: 0.55,
-          minPosePresenceConfidence: 0.55,
-          minTrackingConfidence: 0.55,
-        })
+      setState((current) => ({ ...current, status: 'initializing', message: 'Loading motion intelligence…', fps: 0 }))
+      detectorRef.current = await createDetector(['GPU', 'CPU'])
+      if (!mountedRef.current || !streamRef.current) {
+        detectorRef.current?.close()
+        detectorRef.current = null
+        return
       }
-      if (!mountedRef.current) return
+      trackerRef.current.reset()
+      failuresRef.current = 0
       fpsStartedRef.current = performance.now()
-      setState({ status: 'tracking', message: 'Motion system online.', fps: 0 })
+      setState((current) => ({ ...current, status: 'tracking', message: 'Motion system online.', fps: 0 }))
+
+      const recoverOnCpu = async () => {
+        recoveringRef.current = true
+        detectorRef.current?.close()
+        detectorRef.current = null
+        try {
+          const detector = await createDetector(['CPU'])
+          if (streamRef.current) detectorRef.current = detector
+          else detector.close()
+          failuresRef.current = 0
+        } catch {
+          if (mountedRef.current) setState((current) => ({ ...current, status: 'error', message: 'The motion model stopped responding. Retry the camera.', fps: 0 }))
+        } finally {
+          recoveringRef.current = false
+        }
+      }
 
       const process = (now: number) => {
         const activeVideo = videoRef.current
+        if (!activeVideo || !streamRef.current) return
+        // Schedule first: an exception in inference must never silently end the loop.
+        animationRef.current = requestAnimationFrame(process)
         const activeCanvas = canvasRef.current
         const detector = detectorRef.current
-        if (!activeVideo || !detector || !streamRef.current) return
-        if (activeVideo.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && now - lastInferenceRef.current > 31) {
-          lastInferenceRef.current = now
+        if (!detector || recoveringRef.current) return
+        if (activeVideo.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || now - lastInferenceRef.current <= 31) return
+        lastInferenceRef.current = now
+        try {
           detector.detectForVideo(activeVideo, now, (result) => {
             const landmarks = result.landmarks[0] as Landmark[] | undefined
             if (activeCanvas && activeVideo.videoWidth && activeVideo.videoHeight) {
@@ -190,7 +230,16 @@ export const usePoseCamera = ({ videoRef, canvasRef, onFrame, focusPoints = [] }
               }
               drawPose(activeCanvas, landmarks, focusRef.current)
             }
-            onFrameRef.current(landmarks ? snapshot(landmarks, result.worldLandmarks[0] as Landmark[] | undefined, now) : null)
+            let frame: PoseFrame | null = null
+            if (landmarks) {
+              const tracker = trackerRef.current
+              const previousMode = tracker.mode
+              const mode = tracker.push(landmarks)
+              if (mode !== previousMode && mountedRef.current) setState((current) => ({ ...current, trackingMode: mode }))
+              const aspect = activeVideo.videoWidth && activeVideo.videoHeight ? activeVideo.videoWidth / activeVideo.videoHeight : 16 / 9
+              frame = snapshot(landmarks, result.worldLandmarks[0] as Landmark[] | undefined, now, mode, aspect)
+            }
+            onFrameRef.current(frame)
             fpsFramesRef.current += 1
             if (now - fpsStartedRef.current > 1000) {
               const fps = Math.round((fpsFramesRef.current * 1000) / (now - fpsStartedRef.current))
@@ -199,31 +248,31 @@ export const usePoseCamera = ({ videoRef, canvasRef, onFrame, focusPoints = [] }
               if (mountedRef.current) setState((current) => ({ ...current, fps }))
             }
           })
+          failuresRef.current = 0
+        } catch {
+          failuresRef.current += 1
+          if (failuresRef.current >= MAX_INFERENCE_FAILURES) void recoverOnCpu()
         }
-        animationRef.current = requestAnimationFrame(process)
       }
       animationRef.current = requestAnimationFrame(process)
     } catch (error) {
-      if (permissionTimer !== undefined) window.clearTimeout(permissionTimer)
-      if (requestIdRef.current === requestId) requestIdRef.current += 1
       streamRef.current?.getTracks().forEach((track) => track.stop())
       streamRef.current = null
       const name = error instanceof DOMException ? error.name : ''
-      const message = error instanceof CameraPermissionTimeoutError
-        ? 'Camera permission is still waiting. Click the camera/site icon beside the address bar, select Allow, then retry.'
-        : name === 'NotAllowedError'
-          ? 'Camera access was denied. Allow it in your browser, then retry.'
-        : name === 'NotFoundError'
-          ? 'No camera was found. Connect a camera and retry.'
-          : 'The motion system could not start. Check your connection and retry.'
-      if (mountedRef.current) setState({ status: name === 'NotAllowedError' ? 'denied' : 'error', message, fps: 0 })
+      const message = name === 'NotAllowedError'
+        ? 'Camera access was denied. Allow it in your browser, then retry.'
+        : name === 'NotFoundError' || name === 'OverconstrainedError'
+          ? 'No usable camera was found. Connect a camera and retry.'
+          : name === 'NotReadableError'
+            ? 'The camera is busy in another app (Zoom, Meet, OBS…). Close it, then retry.'
+            : 'The motion system could not start. Check your connection and retry.'
+      if (mountedRef.current) setState((current) => ({ ...current, status: name === 'NotAllowedError' ? 'denied' : 'error', message, fps: 0 }))
     }
   }, [canvasRef, videoRef])
 
   useEffect(() => {
-    // React Strict Mode intentionally runs an effect cleanup once in
-    // development. Reset this flag on each setup so that test cleanup does
-    // not make every later camera stream look stale.
+    // StrictMode runs this cleanup once on mount in development; setting the flag
+    // here (not only at ref creation) keeps `npm run dev` from killing the camera.
     mountedRef.current = true
     return () => {
       mountedRef.current = false

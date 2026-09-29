@@ -1,6 +1,9 @@
-import { analyzeMovementError } from '../errors/errorAnalyzer'
-import { GESTURE_CONFIG } from './gestureConfig'
-import { angleAt, average, clamp, distance, midpoint, mirroredPoint, visible } from './geometry'
+import { analyzeMovementError, analyzeVaultError } from '../errors/errorAnalyzer'
+import { evaluateLaser } from '../laser/laserCollision'
+import { GESTURE_CONFIG, TRACKING_CONFIG } from './gestureConfig'
+import { angleAt, clamp, distance, midpoint, mirroredPoint, visible } from './geometry'
+import { deskLevel } from './trackingMode'
+import { VaultBreach } from './vaultBreach'
 import { PoseIndex, type CalibrationBaseline, type Landmark, type PoseFrame } from '../types/pose'
 import type { GestureId, GestureMetrics, GestureSignal } from '../types/game'
 
@@ -26,10 +29,25 @@ const poseSize = (leftShoulder: Landmark, rightShoulder: Landmark, leftHip: Land
   return { shoulders, hips, shoulderWidth: distance(leftShoulder, rightShoulder), torso: distance(shoulders, hips) }
 }
 
+/**
+ * Seated at a laptop the hips are off-screen and MediaPipe extrapolates them.
+ * Trust that guess only when it agrees with the shoulder-width body scale.
+ */
+const deskTorsoHeight = (frame: PoseFrame, shouldersY: number, hipsY: number, shoulderWidth: number) => {
+  const estimate = shoulderWidth * (frame.aspect ?? 16 / 9) * TRACKING_CONFIG.torsoPerShoulderWidth
+  const measured = hipsY - shouldersY
+  return measured > estimate * 0.6 && measured < estimate * 1.6 ? measured : estimate
+}
+
+/** Desk mode judges only what a laptop camera can see: shoulders and head. */
+const upperBodyConfidence = (frame: PoseFrame, leftShoulder: Landmark, rightShoulder: Landmark) =>
+  visible(leftShoulder, rightShoulder, frame.landmarks[PoseIndex.NOSE] ?? { x: 0, y: 0, z: 0, visibility: 0 })
+
 export const canCalibrate = (frame: PoseFrame) => {
   if (frame.landmarks.length < 29) return false
   const p = requiredPoints(frame)
   const { shoulderWidth, torso } = poseSize(p.leftShoulder, p.rightShoulder, p.leftHip, p.rightHip)
+  if (frame.trackingMode === 'desk') return upperBodyConfidence(frame, p.leftShoulder, p.rightShoulder) >= 0.6 && shoulderWidth > 0.11
   const confidence = visible(...Object.values(p))
   return confidence >= 0.55 && shoulderWidth > 0.11 && torso > 0.15
 }
@@ -37,46 +55,55 @@ export const canCalibrate = (frame: PoseFrame) => {
 export const calibrationFrom = (frame: PoseFrame): CalibrationBaseline | null => {
   if (!canCalibrate(frame)) return null
   const p = requiredPoints(frame)
-  const { hips, shoulderWidth, torso } = poseSize(p.leftShoulder, p.rightShoulder, p.leftHip, p.rightHip)
-  return { hipY: hips.y, shoulderWidth, torso, capturedAt: frame.timestamp }
+  const { shoulders, hips, shoulderWidth, torso } = poseSize(p.leftShoulder, p.rightShoulder, p.leftHip, p.rightHip)
+  const noseY = frame.landmarks[PoseIndex.NOSE]?.y ?? shoulders.y - torso * 0.4
+  if (frame.trackingMode === 'desk') {
+    const torsoHeight = deskTorsoHeight(frame, shoulders.y, hips.y, shoulderWidth)
+    return { mode: 'desk', hipY: shoulders.y + torsoHeight, shoulderY: shoulders.y, shoulderX: shoulders.x, noseY, shoulderWidth, torso: torsoHeight, capturedAt: frame.timestamp }
+  }
+  return { mode: 'full', hipY: hips.y, shoulderY: shoulders.y, shoulderX: shoulders.x, noseY, shoulderWidth, torso, capturedAt: frame.timestamp }
 }
 
-export const extractMetrics = (frame: PoseFrame, baseline: CalibrationBaseline): GestureMetrics | null => {
+export const extractMetrics = (frame: PoseFrame, baseline: CalibrationBaseline, withLaser = false): GestureMetrics | null => {
   if (frame.landmarks.length < 29) return null
+  const trackingMode = frame.trackingMode ?? 'full'
+  const desk = trackingMode === 'desk'
   const p = requiredPoints(frame)
-  const { shoulders, hips, shoulderWidth, torso } = poseSize(p.leftShoulder, p.rightShoulder, p.leftHip, p.rightHip)
+  const size = poseSize(p.leftShoulder, p.rightShoulder, p.leftHip, p.rightHip)
+  const { shoulders, hips, shoulderWidth } = size
+  const torso = desk ? deskTorsoHeight(frame, shoulders.y, hips.y, shoulderWidth) : size.torso
   if (shoulderWidth < 0.06 || torso < 0.09) return null
 
   const rightHandLift = (p.rightShoulder.y - p.rightWrist.y) / torso
-  const leanDegrees = Math.atan2(shoulders.x - hips.x, hips.y - shoulders.y) * (180 / Math.PI)
+  // Normalized x and y have different scales (x / width, y / height); convert to true pixel
+  // geometry so 15 degrees means 15 degrees on any aspect ratio, matching the pose templates.
+  // At a desk the hips are off-screen and MediaPipe's guess drifts with the shoulders, which
+  // would hide the lean. Pivot instead on a virtual hip fixed under the calibrated shoulders.
+  const pivot = desk ? { x: baseline.shoulderX, y: baseline.hipY } : hips
+  const leanDegrees = Math.atan2((shoulders.x - pivot.x) * (frame.aspect ?? 16 / 9), pivot.y - shoulders.y) * (180 / Math.PI)
   const hipDrop = (hips.y - baseline.hipY) / Math.max(baseline.torso, torso)
+  const nose = frame.landmarks[PoseIndex.NOSE]
+  const deskDrop = nose
+    ? (deskLevel(shoulders.y, nose.y) - deskLevel(baseline.shoulderY, baseline.noseY)) / (baseline.hipY - baseline.shoulderY)
+    : 0
   const leftKneeAngle = angleAt(p.leftHip, p.leftKnee, p.leftAnkle)
   const rightKneeAngle = angleAt(p.rightHip, p.rightKnee, p.rightAnkle)
 
-  // z is relative camera depth. We normalize it by shoulder width so users at
-  // different distances can activate the vault with the same forward motion.
-  const world = frame.worldLandmarks?.length ? frame.worldLandmarks : frame.landmarks
-  const depth = (index: number) => world[index]?.z ?? frame.landmarks[index].z
-  const shoulderZ = average([depth(PoseIndex.LEFT_SHOULDER), depth(PoseIndex.RIGHT_SHOULDER)])
-  const leftForward = (shoulderZ - depth(PoseIndex.LEFT_WRIST)) / Math.max(shoulderWidth, 0.08)
-  const rightForward = (shoulderZ - depth(PoseIndex.RIGHT_WRIST)) / Math.max(shoulderWidth, 0.08)
-  const handsSymmetry = Math.abs(p.leftWrist.y - p.rightWrist.y) / torso
-  const handsSpread = distance(p.leftWrist, p.rightWrist) / shoulderWidth
-  const confidence = visible(...Object.values(p))
+  // Knees and ankles are guaranteed to be missing at a desk; they must not veto every action.
+  const confidence = desk ? upperBodyConfidence(frame, p.leftShoulder, p.rightShoulder) : visible(...Object.values(p))
 
   return {
+    trackingMode,
     confidence,
     torso,
     shoulderWidth,
     handLift: rightHandLift,
     leanDegrees,
     hipDrop,
+    deskDrop,
     leftKneeAngle,
     rightKneeAngle,
-    leftForward,
-    rightForward,
-    handsSymmetry,
-    handsSpread,
+    laser: withLaser ? evaluateLaser(frame, baseline) ?? undefined : undefined,
     frame,
   }
 }
@@ -91,9 +118,11 @@ const movementEffort = (gesture: GestureId, metrics: GestureMetrics) => {
     case 'LEAN_RIGHT':
       return clamp(metrics.leanDegrees / (config.leanDegrees ?? 1))
     case 'SQUAT':
+      if (metrics.laser) return metrics.laser.targetDrop > 0 ? clamp(metrics.laser.currentDrop / metrics.laser.targetDrop) : 1
+      if (metrics.trackingMode === 'desk') return clamp(metrics.deskDrop / (config.deskDrop ?? 1))
       return clamp(metrics.hipDrop / (config.hipDrop ?? 1))
-    case 'BOTH_HANDS_FORWARD':
-      return clamp(Math.min(metrics.leftForward, metrics.rightForward) / (config.handsForward ?? 1))
+    case 'VAULT_BREACH':
+      return 0 // driven by VaultBreach
   }
 }
 
@@ -108,18 +137,23 @@ const isValid = (gesture: GestureId, metrics: GestureMetrics) => {
     case 'LEAN_RIGHT':
       return metrics.leanDegrees >= (config.leanDegrees ?? Infinity)
     case 'SQUAT':
+      // The physical beam replaces the abstract squat check whenever it can be evaluated.
+      if (metrics.laser) return !metrics.laser.breached
+      if (metrics.trackingMode === 'desk') return metrics.deskDrop >= (config.deskDrop ?? Infinity)
       return metrics.hipDrop >= (config.hipDrop ?? Infinity)
-        && metrics.leftKneeAngle <= (config.kneeAngle ?? 0)
-        && metrics.rightKneeAngle <= (config.kneeAngle ?? 0)
-    case 'BOTH_HANDS_FORWARD': {
-      const [minSpread, maxSpread] = config.handsSpread ?? [0, Infinity]
-      return Math.min(metrics.leftForward, metrics.rightForward) >= (config.handsForward ?? Infinity)
-        && metrics.handsSymmetry <= (config.handsSymmetry ?? 0)
-        && metrics.handsSpread >= minSpread
-        && metrics.handsSpread <= maxSpread
-    }
+        && (metrics.leftKneeAngle <= (config.kneeAngle ?? 0) || metrics.rightKneeAngle <= (config.kneeAngle ?? 0))
+    case 'VAULT_BREACH':
+      return false // driven by VaultBreach
   }
 }
+
+/** An attempt must last this long before it can be diagnosed... */
+const DIAGNOSE_AFTER_MS = 480
+/** ...and must have stopped improving: less than this much progress over the stall window. */
+const STALL_WINDOW_MS = 400
+const STALL_PROGRESS = 0.04
+/** A lean this far the wrong way is an attempt too (mirror confusion), so it can be diagnosed. */
+const WRONG_WAY_LEAN_DEGREES = 6
 
 /**
  * A per-target temporal state machine. MediaPipe provides points only; this
@@ -128,8 +162,11 @@ const isValid = (gesture: GestureId, metrics: GestureMetrics) => {
 export class GestureEngine {
   private activeSince: number | null = null
   private attemptSince: number | null = null
+  private effortHistory: Array<{ time: number; effort: number }> = []
   private cooldownUntil = 0
   private target: GestureId | null = null
+  private readonly vault = new VaultBreach()
+  private vaultReported = false
 
   setTarget(target: GestureId | null) {
     if (target !== this.target) this.reset(target)
@@ -139,7 +176,10 @@ export class GestureEngine {
     this.target = target
     this.activeSince = null
     this.attemptSince = null
+    this.effortHistory = []
     this.cooldownUntil = 0
+    this.vault.reset()
+    this.vaultReported = false
   }
 
   update(target: GestureId, frame: PoseFrame | null, baseline: CalibrationBaseline): GestureSignal {
@@ -147,13 +187,14 @@ export class GestureEngine {
     if (!frame) {
       return { gesture: target, progress: 0, confidence: 0, valid: false, success: false, attempting: false }
     }
-    const metrics = extractMetrics(frame, baseline)
+    const metrics = extractMetrics(frame, baseline, target === 'SQUAT')
     if (!metrics || metrics.confidence < 0.45) {
       this.activeSince = null
       return { gesture: target, progress: 0, confidence: metrics?.confidence ?? 0, valid: false, success: false, attempting: false, metrics: metrics ?? undefined }
     }
 
     const now = frame.timestamp
+    if (target === 'VAULT_BREACH') return this.updateVault(metrics, now)
     const valid = isValid(target, metrics)
     const effort = movementEffort(target, metrics)
     const config = GESTURE_CONFIG[target]
@@ -171,15 +212,53 @@ export class GestureEngine {
     }
 
     this.activeSince = null
-    const attempting = effort >= 0.14 || (target === 'BOTH_HANDS_FORWARD' && Math.max(metrics.leftForward, metrics.rightForward) > 0.035)
+    const wrongWay = (target === 'LEAN_LEFT' && metrics.leanDegrees >= WRONG_WAY_LEAN_DEGREES)
+      || (target === 'LEAN_RIGHT' && metrics.leanDegrees <= -WRONG_WAY_LEAN_DEGREES)
+    const attempting = effort >= 0.14 || wrongWay
     if (attempting) {
       if (this.attemptSince === null) this.attemptSince = now
     } else {
       this.attemptSince = null
     }
-    const error = attempting && this.attemptSince !== null && now - this.attemptSince > 480
+    // Diagnose a stall, not a transition: a player still sinking into a squat is moving
+    // correctly and must not be penalized just because 480 ms have passed.
+    const stalled = this.recordEffort(now, attempting ? effort : null)
+    const error = attempting && stalled && this.attemptSince !== null && now - this.attemptSince > DIAGNOSE_AFTER_MS
       ? analyzeMovementError(target, metrics)
       : undefined
     return { gesture: target, progress: effort * 0.55, confidence: metrics.confidence, valid: false, success: false, attempting, error, metrics }
+  }
+
+  /** True when effort rose by less than STALL_PROGRESS over the last STALL_WINDOW_MS. */
+  private recordEffort(now: number, effort: number | null) {
+    if (effort === null) {
+      this.effortHistory = []
+      return false
+    }
+    this.effortHistory.push({ time: now, effort })
+    while (this.effortHistory.length > 1 && now - this.effortHistory[1].time >= STALL_WINDOW_MS) this.effortHistory.shift()
+    const oldest = this.effortHistory[0]
+    if (now - oldest.time < STALL_WINDOW_MS) return false
+    return effort - oldest.effort < STALL_PROGRESS
+  }
+
+  /** The finale is a two-phase physical action, not a hold: PALM LOCK, then KINETIC BREACH. */
+  private updateVault(metrics: GestureMetrics, now: number): GestureSignal {
+    const vault = this.vault.update(metrics.frame, metrics, now)
+    const success = vault.phase === 'breached' && !this.vaultReported
+    if (success) this.vaultReported = true
+    const locked = vault.phase === 'breaching' || vault.phase === 'breached'
+    return {
+      gesture: 'VAULT_BREACH',
+      // Lock is the first 30% of the meter, the breach the remaining 70%.
+      progress: locked ? 0.3 + 0.7 * vault.breachProgress : 0.3 * vault.lockProgress,
+      confidence: metrics.confidence,
+      valid: vault.phase !== 'align',
+      success,
+      attempting: vault.phase !== 'align' || vault.onePalmSince !== null,
+      error: analyzeVaultError(vault, now),
+      metrics,
+      vault,
+    }
   }
 }
