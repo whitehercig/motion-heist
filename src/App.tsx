@@ -241,6 +241,8 @@ function App() {
   }, [finishMission, screen])
 
   const startHeist = async () => {
+    // A retry cancels an older permission request that may still be pending.
+    stopCamera()
     play('click')
     calibrationSamplesRef.current = []
     baselineRef.current = null
@@ -262,6 +264,15 @@ function App() {
   const isNewHighScore = lastEntry !== null && leaderboard[0]?.id === lastEntry.id
   const cameraTag = camera.status === 'tracking' && frameRef.current ? 'BODY DETECTED' : camera.status === 'tracking' ? 'MOVE INTO FRAME' : camera.message
   const motionProgress = Math.round(signal.progress * 100)
+  const calibrationTitle = camera.status === 'tracking'
+    ? calibrationProgress < .2 ? 'MOVE INTO FRAME' : 'HOLD YOUR POSITION'
+    : camera.status === 'requesting'
+      ? 'ALLOW CAMERA ACCESS'
+      : camera.status === 'initializing'
+        ? 'LOADING MOTION SYSTEM'
+        : camera.status === 'denied' || camera.status === 'error' || camera.status === 'unsupported'
+          ? 'CAMERA ACCESS REQUIRED'
+          : 'INITIALIZING CAMERA'
 
   return (
     <main className={`app screen-${screen}`}>
@@ -311,7 +322,7 @@ function App() {
           {screen === 'calibrating' && (
             <div className="calibration-overlay">
               <p className="eyebrow"><span className="live-dot" /> CAMERA CALIBRATION</p>
-              <h2>{camera.status === 'tracking' ? calibrationProgress < .2 ? 'MOVE INTO FRAME' : 'HOLD YOUR POSITION' : 'INITIALIZING CAMERA'}</h2>
+              <h2>{calibrationTitle}</h2>
               <p>{camera.status === 'tracking' ? 'Stand back until your shoulders, hips and knees are visible.' : camera.message}</p>
               <div className="calibration-bar"><span style={{ width: `${calibrationProgress * 100}%` }} /></div>
               <div className="calibration-readout"><span>{Math.round(calibrationProgress * 100)}% BODY MAP</span><span>{camera.fps ? `${camera.fps} FPS` : 'LINKING'}</span></div>

@@ -19,6 +19,14 @@ interface UsePoseCameraOptions {
 
 const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm'
 const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task'
+const CAMERA_PERMISSION_TIMEOUT_MS = 8_000
+
+class CameraPermissionTimeoutError extends Error {
+  constructor() {
+    super('Camera permission request timed out.')
+    this.name = 'CameraPermissionTimeoutError'
+  }
+}
 
 const CONNECTIONS: Array<[number, number]> = [
   [11, 12], [11, 13], [13, 15], [12, 14], [14, 16], [11, 23], [12, 24], [23, 24],
@@ -76,11 +84,14 @@ export const usePoseCamera = ({ videoRef, canvasRef, onFrame, focusPoints = [] }
   const mountedRef = useRef(true)
   const fpsFramesRef = useRef(0)
   const fpsStartedRef = useRef(0)
+  const requestIdRef = useRef(0)
 
   useEffect(() => { onFrameRef.current = onFrame }, [onFrame])
   useEffect(() => { focusRef.current = focusPoints }, [focusPoints])
 
   const stop = useCallback(() => {
+    // Any late approval from a dismissed browser permission prompt is ignored.
+    requestIdRef.current += 1
     if (animationRef.current !== null) cancelAnimationFrame(animationRef.current)
     animationRef.current = null
     detectorRef.current?.close()
@@ -104,13 +115,30 @@ export const usePoseCamera = ({ videoRef, canvasRef, onFrame, focusPoints = [] }
       return
     }
 
+    const requestId = ++requestIdRef.current
+    let permissionTimer: number | undefined
     try {
-      setState({ status: 'requesting', message: 'Requesting camera access…', fps: 0 })
-      const stream = await navigator.mediaDevices.getUserMedia({
+      setState({
+        status: 'requesting',
+        message: 'Click Allow in the browser camera prompt. If it is hidden, use the camera icon beside the address bar.',
+        fps: 0,
+      })
+      const mediaRequest = navigator.mediaDevices.getUserMedia({
         video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } },
         audio: false,
       })
-      if (!mountedRef.current) {
+      // Browsers may leave getUserMedia pending indefinitely while their native
+      // dialog is ignored. A late approval is stopped after a timeout/retry.
+      void mediaRequest.then((lateStream) => {
+        if (!mountedRef.current || requestIdRef.current !== requestId) lateStream.getTracks().forEach((track) => track.stop())
+      }).catch(() => undefined)
+      const timeout = new Promise<never>((_, reject) => {
+        permissionTimer = window.setTimeout(() => reject(new CameraPermissionTimeoutError()), CAMERA_PERMISSION_TIMEOUT_MS)
+      })
+      const stream = await Promise.race([mediaRequest, timeout])
+      window.clearTimeout(permissionTimer)
+      permissionTimer = undefined
+      if (!mountedRef.current || requestIdRef.current !== requestId) {
         stream.getTracks().forEach((track) => track.stop())
         return
       }
@@ -176,11 +204,15 @@ export const usePoseCamera = ({ videoRef, canvasRef, onFrame, focusPoints = [] }
       }
       animationRef.current = requestAnimationFrame(process)
     } catch (error) {
+      if (permissionTimer !== undefined) window.clearTimeout(permissionTimer)
+      if (requestIdRef.current === requestId) requestIdRef.current += 1
       streamRef.current?.getTracks().forEach((track) => track.stop())
       streamRef.current = null
       const name = error instanceof DOMException ? error.name : ''
-      const message = name === 'NotAllowedError'
-        ? 'Camera access was denied. Allow it in your browser, then retry.'
+      const message = error instanceof CameraPermissionTimeoutError
+        ? 'Camera permission is still waiting. Click the camera/site icon beside the address bar, select Allow, then retry.'
+        : name === 'NotAllowedError'
+          ? 'Camera access was denied. Allow it in your browser, then retry.'
         : name === 'NotFoundError'
           ? 'No camera was found. Connect a camera and retry.'
           : 'The motion system could not start. Check your connection and retry.'
