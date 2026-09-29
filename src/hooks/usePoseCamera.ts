@@ -220,9 +220,15 @@ export const usePoseCamera = ({ videoRef, canvasRef, onFrame, focusPoints = [] }
     }
   }, [canvasRef, videoRef])
 
-  useEffect(() => () => {
-    mountedRef.current = false
-    stop()
+  useEffect(() => {
+    // React Strict Mode intentionally runs an effect cleanup once in
+    // development. Reset this flag on each setup so that test cleanup does
+    // not make every later camera stream look stale.
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      stop()
+    }
   }, [stop])
 
   return { ...state, start, stop }
