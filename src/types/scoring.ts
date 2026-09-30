@@ -60,6 +60,7 @@ export interface MissionTelemetry {
 }
 
 export interface RecoveryEntry {
+  gesture: GestureId
   objective: string
   /** The first diagnosis in the phase: what the player was told to fix. */
   anomaly: AnomalyRecord

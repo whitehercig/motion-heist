@@ -13,10 +13,13 @@ export interface GestureThresholds {
   /** Vault: wrist spread needed for a full breach, in shoulder widths. */
   breachSpan?: number
   breachComplete?: number
+  /** FREEZE: maximum upper-body travel per 300 ms, in shoulder widths. */
+  motionEnergy?: number
 }
 
 export const GESTURE_CONFIG: Record<GestureId, GestureThresholds> = {
   RIGHT_HAND_UP: { holdMs: 620, handLift: 0.42 },
+  FREEZE: { holdMs: 1500, motionEnergy: 0.15 },
   LEAN_LEFT: { holdMs: 560, leanDegrees: 15 },
   LEAN_RIGHT: { holdMs: 560, leanDegrees: 15 },
   SQUAT: { holdMs: 720, hipDrop: 0.17, deskDrop: 0.22, kneeAngle: 154 },
@@ -41,11 +44,3 @@ export const TRACKING_CONFIG = {
   rebaseSamples: 12,
   rebaseTolerance: 0.04,
 } as const
-
-export const GESTURE_LABELS: Record<GestureId, string> = {
-  RIGHT_HAND_UP: 'SCAN ACCESS',
-  LEAN_LEFT: 'DODGE LEFT',
-  LEAN_RIGHT: 'DODGE RIGHT',
-  SQUAT: 'DUCK UNDER LASER',
-  VAULT_BREACH: 'OPEN VAULT',
-}

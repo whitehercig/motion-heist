@@ -1,4 +1,5 @@
 import { useEffect, useRef, type RefObject } from 'react'
+import { t } from '../i18n/i18n'
 import { clamp } from '../motion/geometry'
 import { CHEST_BELOW_SHOULDERS, matchFrame, POSE_TEMPLATES, TEMPLATE_TORSO } from '../motion/poseTemplates'
 import { createCoverViewport, measureCoverViewport, syncCanvasToVideo, type ViewBounds } from '../render/coverViewport'
@@ -204,8 +205,8 @@ const drawSyncGauge = (
 ) => {
   const radius = 22 * px
   const percent = Math.round(shown)
-  const status = locked ? 'LOCKED' : percent >= 60 ? 'ALIGNING' : 'SEARCHING'
-  const label = `SYNC: ${percent}% ${status}`
+  const status = t(locked ? 'holo.locked' : percent >= 60 ? 'holo.aligning' : 'holo.searching')
+  const label = t('holo.sync', { n: percent, status })
   ctx.save()
   ctx.font = `700 ${10.5 * px}px ${MONO}`
   const labelWidth = ctx.measureText(label).width

@@ -1,7 +1,9 @@
 import type { CalibrationBaseline, PoseFrame, TrackingMode } from './pose'
 
-export type GestureId = 'RIGHT_HAND_UP' | 'LEAN_LEFT' | 'LEAN_RIGHT' | 'SQUAT' | 'VAULT_BREACH'
-export type Screen = 'landing' | 'calibrating' | 'briefing' | 'playing' | 'results' | 'leaderboard'
+export type GestureId = 'RIGHT_HAND_UP' | 'FREEZE' | 'LEAN_LEFT' | 'LEAN_RIGHT' | 'SQUAT' | 'VAULT_BREACH'
+export type Screen = 'landing' | 'calibrating' | 'briefing' | 'playing' | 'arcade' | 'duelSwap' | 'duelResult' | 'arcadeResults' | 'results' | 'leaderboard'
+/** story = the 3-act heist; training = the same moves without timer or penalties; duel = two arcade runs on one seed. */
+export type GameMode = 'story' | 'training' | 'arcade' | 'duel'
 
 export interface GestureMetrics {
   trackingMode: TrackingMode
@@ -15,6 +17,8 @@ export interface GestureMetrics {
   deskDrop: number
   leftKneeAngle: number
   rightKneeAngle: number
+  /** FREEZE only: upper-body travel over the last 300 ms, in shoulder widths; undefined until the window fills. */
+  motionEnergy?: number
   /** Present only while the DUCK UNDER LASER target is active. */
   laser?: LaserReading
   frame: PoseFrame
@@ -76,13 +80,12 @@ export interface GestureSignal {
   metrics?: GestureMetrics
 }
 
+/** Player-facing text (name, hint, scene) lives in the i18n table under `move.<gesture>.*`. */
 export interface GameAction {
   gesture: GestureId
+  /** Stable English label for telemetry and the jury audit JSON. */
   objective: string
-  hint: string
-  /** Shown instead of hint while desk (upper-body) tracking is active. */
-  deskHint?: string
-  scene: string
+  act: 1 | 2 | 3
 }
 
 export interface HeistStats {
@@ -113,9 +116,11 @@ export interface LeaderboardEntry {
   time: number
   date: string
   style: string
+  /** Missing on records saved before arcade mode existed: those are story runs. */
+  mode?: 'story' | 'arcade'
 }
 
-export type PoseTemplateId = 'SCAN_ACCESS' | 'DODGE_LEFT' | 'DODGE_RIGHT' | 'DUCK_LASER' | 'OPEN_VAULT'
+export type PoseTemplateId = 'SCAN_ACCESS' | 'GUARD_FREEZE' | 'DODGE_LEFT' | 'DODGE_RIGHT' | 'DUCK_LASER' | 'OPEN_VAULT'
 
 export type TemplateJoint =
   | 'nose'

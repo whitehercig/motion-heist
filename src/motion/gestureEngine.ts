@@ -2,6 +2,7 @@ import { analyzeMovementError, analyzeVaultError } from '../errors/errorAnalyzer
 import { evaluateLaser } from '../laser/laserCollision'
 import { GESTURE_CONFIG, TRACKING_CONFIG } from './gestureConfig'
 import { angleAt, clamp, distance, midpoint, mirroredPoint, visible } from './geometry'
+import { MotionEnergyMeter } from './motionEnergy'
 import { deskLevel } from './trackingMode'
 import { VaultBreach } from './vaultBreach'
 import { PoseIndex, type CalibrationBaseline, type Landmark, type PoseFrame } from '../types/pose'
@@ -113,6 +114,8 @@ const movementEffort = (gesture: GestureId, metrics: GestureMetrics) => {
   switch (gesture) {
     case 'RIGHT_HAND_UP':
       return clamp(metrics.handLift / (config.handLift ?? 1))
+    case 'FREEZE':
+      return metrics.motionEnergy === undefined ? 0 : clamp(1 - metrics.motionEnergy / (config.motionEnergy ?? 1))
     case 'LEAN_LEFT':
       return clamp((-metrics.leanDegrees) / (config.leanDegrees ?? 1))
     case 'LEAN_RIGHT':
@@ -132,6 +135,8 @@ const isValid = (gesture: GestureId, metrics: GestureMetrics) => {
   switch (gesture) {
     case 'RIGHT_HAND_UP':
       return metrics.handLift >= (config.handLift ?? Infinity)
+    case 'FREEZE':
+      return metrics.motionEnergy !== undefined && metrics.motionEnergy <= (config.motionEnergy ?? 0)
     case 'LEAN_LEFT':
       return metrics.leanDegrees <= -(config.leanDegrees ?? Infinity)
     case 'LEAN_RIGHT':
@@ -154,6 +159,11 @@ const STALL_WINDOW_MS = 400
 const STALL_PROGRESS = 0.04
 /** A lean this far the wrong way is an attempt too (mirror confusion), so it can be diagnosed. */
 const WRONG_WAY_LEAN_DEGREES = 6
+/**
+ * FREEZE has no "effort" to stall on: moving at all is the mistake. The player
+ * gets this long to settle after the previous move before the guard calls it.
+ */
+const FREEZE_DIAGNOSE_MS = 1100
 
 /**
  * A per-target temporal state machine. MediaPipe provides points only; this
@@ -166,6 +176,7 @@ export class GestureEngine {
   private cooldownUntil = 0
   private target: GestureId | null = null
   private readonly vault = new VaultBreach()
+  private readonly motion = new MotionEnergyMeter()
   private vaultReported = false
 
   setTarget(target: GestureId | null) {
@@ -179,6 +190,7 @@ export class GestureEngine {
     this.effortHistory = []
     this.cooldownUntil = 0
     this.vault.reset()
+    this.motion.reset()
     this.vaultReported = false
   }
 
@@ -195,6 +207,7 @@ export class GestureEngine {
 
     const now = frame.timestamp
     if (target === 'VAULT_BREACH') return this.updateVault(metrics, now)
+    if (target === 'FREEZE') metrics.motionEnergy = this.motion.update(frame, metrics.shoulderWidth)
     const valid = isValid(target, metrics)
     const effort = movementEffort(target, metrics)
     const config = GESTURE_CONFIG[target]
@@ -212,6 +225,7 @@ export class GestureEngine {
     }
 
     this.activeSince = null
+    if (target === 'FREEZE') return this.updateFreezeMiss(metrics, now)
     const wrongWay = (target === 'LEAN_LEFT' && metrics.leanDegrees >= WRONG_WAY_LEAN_DEGREES)
       || (target === 'LEAN_RIGHT' && metrics.leanDegrees <= -WRONG_WAY_LEAN_DEGREES)
     const attempting = effort >= 0.14 || wrongWay
@@ -227,6 +241,16 @@ export class GestureEngine {
       ? analyzeMovementError(target, metrics)
       : undefined
     return { gesture: target, progress: effort * 0.55, confidence: metrics.confidence, valid: false, success: false, attempting, error, metrics }
+  }
+
+  /** Moving under the searchlight resets the hold; still moving after the grace period is diagnosed. */
+  private updateFreezeMiss(metrics: GestureMetrics, now: number): GestureSignal {
+    const measured = metrics.motionEnergy !== undefined
+    if (measured) this.attemptSince ??= now
+    const error = measured && this.attemptSince !== null && now - this.attemptSince > FREEZE_DIAGNOSE_MS
+      ? analyzeMovementError('FREEZE', metrics)
+      : undefined
+    return { gesture: 'FREEZE', progress: 0, confidence: metrics.confidence, valid: false, success: false, attempting: measured, error, metrics }
   }
 
   /** True when effort rose by less than STALL_PROGRESS over the last STALL_WINDOW_MS. */

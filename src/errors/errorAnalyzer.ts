@@ -1,3 +1,4 @@
+import { t } from '../i18n/i18n'
 import { GESTURE_CONFIG } from '../motion/gestureConfig'
 import { PoseIndex } from '../types/pose'
 import type { GestureId, GestureMetrics, LaserReading, MovementError, VaultCursor, VaultReading, VaultTarget } from '../types/game'
@@ -7,44 +8,55 @@ const degree = (value: number) => `${Math.abs(Math.round(value))}°`
 const percent = (fraction: number) => Math.round(fraction * 100)
 
 const DESK_FOCUS = [PoseIndex.NOSE, PoseIndex.LEFT_SHOULDER, PoseIndex.RIGHT_SHOULDER]
+const UPPER_BODY_FOCUS = [
+  PoseIndex.NOSE,
+  PoseIndex.LEFT_SHOULDER, PoseIndex.RIGHT_SHOULDER,
+  PoseIndex.LEFT_ELBOW, PoseIndex.RIGHT_ELBOW,
+  PoseIndex.LEFT_WRIST, PoseIndex.RIGHT_WRIST,
+]
 
-const laserBodyPart = (index: number | null) => {
-  if (index === null) return 'HEAD & CHEST'
+type LaserPart = 'HEAD' | 'SHOULDERS' | 'HIPS'
+
+const laserBodyPart = (index: number): LaserPart => {
   if (index === PoseIndex.NOSE) return 'HEAD'
   if (index === PoseIndex.LEFT_SHOULDER || index === PoseIndex.RIGHT_SHOULDER) return 'SHOULDERS'
   return 'HIPS'
 }
+
+const dropValue = (fraction: number) => t('u.drop', { n: percent(fraction) })
 
 /** Correction distance shown next to the on-canvas arrow; never reads "0 CM" while still breaching. */
 export const laserCorrectionCm = (reading: LaserReading) => Math.max(1, reading.deltaCm)
 
 /** "LOWER BY {cm} CM" + "(CURRENT: {n}%, TARGET: {n}%)", split so the canvas can stack them. */
 export const laserCorrectionParts = (reading: LaserReading): [string, string] => [
-  `LOWER BY ${laserCorrectionCm(reading)} CM`,
-  `(CURRENT: ${percent(reading.currentDrop)}%, TARGET: ${percent(reading.targetDrop)}%)`,
+  t('laser.lower', { cm: laserCorrectionCm(reading) }),
+  t('laser.measures', { cur: percent(reading.currentDrop), tgt: percent(reading.targetDrop) }),
 ]
 
 export const analyzeLaserBreach = (reading: LaserReading): MovementError => {
-  const part = laserBodyPart(reading.worst.index)
   const cm = laserCorrectionCm(reading)
-  if (reading.mode === 'desk') {
+  const current = t('m.current', { v: dropValue(reading.currentDrop) })
+  const target = t('m.target', { v: dropValue(reading.targetDrop) })
+  if (reading.mode === 'desk' || reading.worst.index === null) {
     return {
-      title: 'LOWER HEAD & CHEST',
-      detail: `Desk mode: your head and chest are ${cm} cm above the beam.`,
-      correction: `Lean down toward the desk by ${cm} cm — tuck your chin and fold your chest.`,
+      title: t('err.desk.title'),
+      detail: t('err.deskLaser.detail', { cm }),
+      correction: t('err.deskLaser.fix', { cm }),
       arrow: '↓',
-      current: `CURRENT ${percent(reading.currentDrop)}% DROP`,
-      target: `TARGET ${percent(reading.targetDrop)}% DROP`,
+      current,
+      target,
       focus: DESK_FOCUS,
     }
   }
+  const part = laserBodyPart(reading.worst.index)
   return {
-    title: `LASER CONTACT — ${part}`,
-    detail: `Your ${part.toLowerCase()} ${part === 'HEAD' ? 'is' : 'are'} ${cm} cm above the beam.`,
-    correction: `Lower by ${cm} cm — bend your knees and tuck your head under the beam.`,
+    title: t('err.laser.title', { part: t(`laser.part.${part}`) }),
+    detail: t('err.laser.detail', { subject: t(`laser.subject.${part}`), cm }),
+    correction: t('err.laser.fix', { cm }),
     arrow: '↓',
-    current: `CURRENT ${percent(reading.currentDrop)}% DROP`,
-    target: `TARGET ${percent(reading.targetDrop)}% DROP`,
+    current,
+    target,
     focus: reading.joints.flatMap((joint) => (joint.breaching && joint.index !== null ? [joint.index] : [])),
   }
 }
@@ -54,13 +66,26 @@ export const analyzeMovementError = (gesture: GestureId, metrics: GestureMetrics
 
   if (gesture === 'RIGHT_HAND_UP') {
     return {
-      title: 'RIGHT HAND TOO LOW',
-      detail: `Your hand is ${Math.round(metrics.handLift * 100)}% of the required lift.`,
-      correction: 'Raise your right hand above your shoulder.',
+      title: t('err.hand.title'),
+      detail: t('err.hand.detail', { n: percent(metrics.handLift) }),
+      correction: t('err.hand.fix'),
       arrow: '↑',
-      current: `${Math.round(metrics.handLift * 100)}% LIFT`,
-      target: `${Math.round((config.handLift ?? 0) * 100)}% LIFT`,
+      current: t('u.lift', { n: percent(metrics.handLift) }),
+      target: t('u.lift', { n: percent(config.handLift ?? 0) }),
       focus: [PoseIndex.RIGHT_WRIST, PoseIndex.RIGHT_SHOULDER],
+    }
+  }
+
+  if (gesture === 'FREEZE') {
+    const energy = percent(metrics.motionEnergy ?? 0)
+    return {
+      title: t('err.freeze.title'),
+      detail: t('err.freeze.detail', { n: energy }),
+      correction: t('err.freeze.fix'),
+      arrow: '↔',
+      current: t('err.freeze.current', { n: energy }),
+      target: t('err.freeze.target', { n: percent(config.motionEnergy ?? 0) }),
+      focus: UPPER_BODY_FOCUS,
     }
   }
 
@@ -68,20 +93,20 @@ export const analyzeMovementError = (gesture: GestureId, metrics: GestureMetrics
     const intended = gesture === 'LEAN_LEFT' ? -1 : 1
     const current = metrics.leanDegrees * intended
     const arrow = gesture === 'LEAN_LEFT' ? '←' : '→'
-    const side = gesture === 'LEAN_LEFT' ? 'LEFT' : 'RIGHT'
-    const wrongSide = side === 'LEFT' ? 'RIGHT' : 'LEFT'
+    const side = gesture === 'LEAN_LEFT' ? 'left' : 'right'
+    const wrongSide = side === 'left' ? 'right' : 'left'
     const wrongWay = current < 0
     return {
-      title: wrongWay ? 'WRONG DODGE DIRECTION' : 'TORSO TILT TOO SMALL',
+      title: wrongWay ? t('err.wrongWay.title') : t('err.tilt.title'),
       detail: wrongWay
-        ? `You leaned ${degree(current)} to your ${wrongSide.toLowerCase()} — into the incoming laser. The screen is a mirror.`
-        : `Your body tilt is only ${degree(metrics.leanDegrees)}.`,
+        ? t('err.wrongWay.detail', { deg: degree(current), wrong: t(`side.${wrongSide}`) })
+        : t('err.tilt.detail', { deg: degree(metrics.leanDegrees) }),
       correction: wrongWay
-        ? `Straighten up, then lean to your ${side.toLowerCase()} — toward the ${arrow} side of the screen.`
-        : `Lean ${Math.max(1, Math.ceil((config.leanDegrees ?? 0) - current))}° further to the ${side.toLowerCase()}.`,
+        ? t('err.wrongWay.fix', { side: t(`side.${side}`), arrow })
+        : t('err.tilt.fix', { n: Math.max(1, Math.ceil((config.leanDegrees ?? 0) - current)), side: t(`side.${side}`) }),
       arrow,
-      current: wrongWay ? `CURRENT ${degree(current)} ${wrongSide}` : `CURRENT ${degree(current)}`,
-      target: `TARGET ${config.leanDegrees}° ${side}`,
+      current: t('m.current', { v: wrongWay ? `${degree(current)} ${t(`SIDE.${wrongSide}`)}` : degree(current) }),
+      target: t('m.target', { v: `${config.leanDegrees}° ${t(`SIDE.${side}`)}` }),
       focus: [PoseIndex.LEFT_SHOULDER, PoseIndex.RIGHT_SHOULDER, PoseIndex.LEFT_HIP, PoseIndex.RIGHT_HIP],
     }
   }
@@ -90,12 +115,12 @@ export const analyzeMovementError = (gesture: GestureId, metrics: GestureMetrics
 
   if (gesture === 'SQUAT' && metrics.trackingMode === 'desk') {
     return {
-      title: 'LOWER HEAD & CHEST',
-      detail: `Your head and chest dropped ${percent(metrics.deskDrop)}% of torso height.`,
-      correction: 'Lean down toward the desk — tuck your chin and fold your chest.',
+      title: t('err.desk.title'),
+      detail: t('err.deskSquat.detail', { n: percent(metrics.deskDrop) }),
+      correction: t('err.deskSquat.fix'),
       arrow: '↓',
-      current: `CURRENT ${percent(Math.max(0, metrics.deskDrop))}% DROP`,
-      target: `TARGET ${percent(config.deskDrop ?? 0)}% DROP`,
+      current: t('m.current', { v: dropValue(Math.max(0, metrics.deskDrop)) }),
+      target: t('m.target', { v: dropValue(config.deskDrop ?? 0) }),
       focus: DESK_FOCUS,
     }
   }
@@ -104,34 +129,34 @@ export const analyzeMovementError = (gesture: GestureId, metrics: GestureMetrics
     const knee = Math.min(metrics.leftKneeAngle, metrics.rightKneeAngle)
     if (metrics.hipDrop < (config.hipDrop ?? 0)) {
       return {
-        title: 'HIPS TOO HIGH',
-        detail: `Your hips dropped ${Math.round(metrics.hipDrop * 100)}% of torso height.`,
-        correction: 'Squat deeper and move your hips slightly backward.',
+        title: t('err.hips.title'),
+        detail: t('err.hips.detail', { n: percent(metrics.hipDrop) }),
+        correction: t('err.hips.fix'),
         arrow: '↓',
-        current: `${Math.round(metrics.hipDrop * 100)}% DROP`,
-        target: `${Math.round((config.hipDrop ?? 0) * 100)}% DROP`,
+        current: dropValue(metrics.hipDrop),
+        target: dropValue(config.hipDrop ?? 0),
         focus: [PoseIndex.LEFT_HIP, PoseIndex.RIGHT_HIP, PoseIndex.LEFT_KNEE, PoseIndex.RIGHT_KNEE],
       }
     }
     return {
-      title: 'BEND YOUR KNEES',
-      detail: `Your knee angle is ${Math.round(knee)}° - your stance is still too straight.`,
-      correction: 'Keep your hips low and bend both knees a little more.',
+      title: t('err.knees.title'),
+      detail: t('err.knees.detail', { deg: Math.round(knee) }),
+      correction: t('err.knees.fix'),
       arrow: '↗',
-      current: `CURRENT ${Math.round(knee)}°`,
-      target: `TARGET ≤ ${config.kneeAngle}°`,
+      current: t('m.current', { v: `${Math.round(knee)}°` }),
+      target: t('err.knees.target', { deg: config.kneeAngle ?? 0 }),
       focus: [PoseIndex.LEFT_KNEE, PoseIndex.RIGHT_KNEE],
     }
   }
 
   // VAULT_BREACH is diagnosed from its own state machine (analyzeVaultError); this is only a fallback.
   return {
-    title: 'PALMS NOT ON SCANNERS',
-    detail: 'Both palms must rest on the chest-level scanners before the breach.',
-    correction: 'Bring both hands to the glowing scanners in front of your chest.',
+    title: t('err.palms.title'),
+    detail: t('err.palms.detail'),
+    correction: t('err.palms.fix'),
     arrow: '↑',
-    current: 'NO LOCK',
-    target: 'PALM LOCK',
+    current: t('err.palms.current'),
+    target: t('err.palms.target'),
     focus: [PoseIndex.LEFT_WRIST, PoseIndex.RIGHT_WRIST],
   }
 }
@@ -152,30 +177,28 @@ export const analyzeVaultError = (vault: VaultReading, now: number): MovementErr
   const complete = percent(config.breachComplete ?? 0.95)
   if (vault.releasedAt !== null && vault.phase !== 'breaching' && vault.phase !== 'breached' && now - vault.releasedAt < RELEASE_ERROR_MS) {
     return {
-      title: "DON'T RELEASE — PULL WIDER",
-      detail: `The doors sprang shut at ${percent(vault.releasedProgress)}% — your arms dropped mid-breach.`,
-      correction: 'Re-grip both scanners, then pull your hands straight apart at chest height.',
+      title: t('err.release.title'),
+      detail: t('err.release.detail', { n: percent(vault.releasedProgress) }),
+      correction: t('err.release.fix'),
       arrow: '↔',
-      current: `LAST PULL ${percent(vault.releasedProgress)}%`,
-      target: `TARGET ${complete}%`,
+      current: t('err.release.current', { n: percent(vault.releasedProgress) }),
+      target: t('m.target', { v: `${complete}%` }),
       focus: [PoseIndex.LEFT_WRIST, PoseIndex.RIGHT_WRIST],
     }
   }
   if (vault.phase === 'align' && vault.onePalmSince !== null && now - vault.onePalmSince > PALM_ERROR_MS) {
     const index = vault.targets[0].engaged ? 1 : 0
-    const side = index === 0 ? 'LEFT' : 'RIGHT'
+    const side = index === 0 ? 'left' : 'right'
     const target = vault.targets[index]
     const radius = percent(vault.radius)
     const away = target.offset === null ? null : percent(target.offset * vault.radius)
     return {
-      title: `${side} PALM OFF SCANNER`,
-      detail: away === null
-        ? `Your ${side.toLowerCase()} hand is out of view.`
-        : `Your ${side.toLowerCase()} palm is ${away}% of the screen from its scanner.`,
-      correction: `Move your ${side.toLowerCase()} hand onto the ${side.toLowerCase()} scanner and hold both still.`,
+      title: t(`err.palmOff.title.${side}`),
+      detail: away === null ? t(`err.palmOff.hidden.${side}`) : t(`err.palmOff.detail.${side}`, { n: away }),
+      correction: t(`err.palmOff.fix.${side}`),
       arrow: arrowToward(vault.wrists[index], target),
-      current: away === null ? 'NOT TRACKED' : `CURRENT ${away}% AWAY`,
-      target: `WITHIN ${radius}%`,
+      current: away === null ? t('err.palmOff.untracked') : t('err.palmOff.current', { n: away }),
+      target: t('err.palmOff.target', { n: radius }),
       focus: [index === 0 ? PoseIndex.LEFT_WRIST : PoseIndex.RIGHT_WRIST],
     }
   }

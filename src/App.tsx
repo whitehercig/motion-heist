@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useHeistAudio } from './audio/useHeistAudio'
-import { MISSION, MISSION_DURATION_MS, OVERTIME_LIMIT_MS, OVERTIME_SCORE_FACTOR } from './game/mission'
+import { DEMO_DURATION_MS, MISSION, MISSION_DURATION_MS, OVERTIME_LIMIT_MS, OVERTIME_SCORE_FACTOR } from './game/mission'
+import { t, type StringKey } from './i18n/i18n'
+import { STRINGS } from './i18n/strings'
+import { useLang } from './i18n/useLang'
+import { LangToggle } from './components/LangToggle'
 import { HoloGuideCanvas, type HoloFeed } from './components/HoloGuideCanvas'
 import { VaultStage } from './game/stages/VaultStage'
 import { useLaserCanvas } from './hooks/useLaserCanvas'
@@ -16,6 +20,7 @@ import type { CalibrationBaseline, PoseFrame } from './types/pose'
 import type { GameSession, GestureSignal, LeaderboardEntry, MovementError, Screen, VaultReading } from './types/game'
 import type { DossierReport } from './types/scoring'
 import './styles.css'
+import './features.css'
 
 /** Counts down, then up with a "+" once the mission is in overtime. */
 const formatTime = (milliseconds: number) => {
@@ -36,6 +41,7 @@ const scoreAccuracy = (session: GameSession) => session.stats.successfulActions
   : 0
 
 function App() {
+  useLang()
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const laserCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -182,8 +188,7 @@ function App() {
     }
     gameRef.current = updated
     setGame(updated)
-    const overtimeTag = overtime ? ' · OVERTIME ×0.5' : ''
-    setToast(bonus ? `+${earned} MOTION CONFIRMED · +${bonus} RECOVERY${overtimeTag}` : `+${earned} MOTION CONFIRMED${overtimeTag}`)
+    setToast(`${t('toast.confirmed', { n: earned })}${bonus ? t('toast.recovery', { n: bonus }) : ''}${overtime ? t('toast.overtime') : ''}`)
     setMovementError(null)
     setWarning(null)
     setSignal({ ...motionSignal, progress: 1 })
@@ -216,7 +221,7 @@ function App() {
       const averaged = averageBaselines(calibrationSamplesRef.current)
       baselineRef.current = averaged
       baselinesRef.current.seed(averaged)
-      setToast('BODY LOCKED')
+      setToast(t('toast.bodyLocked'))
       play('scan')
       setScreen('briefing')
     }
@@ -227,10 +232,10 @@ function App() {
     const baseline = baselineRef.current
     if (!baseline) return
     const session: GameSession = {
-      playerName: playerName.trim().slice(0, 16).toUpperCase() || 'OPERATIVE',
+      playerName: playerName.trim().slice(0, 16).toUpperCase() || t('landing.namePlaceholder'),
       startedAt: Date.now(),
       phaseStartedAt: performance.now(),
-      durationMs: demoMode ? 55_000 : MISSION_DURATION_MS,
+      durationMs: demoMode ? DEMO_DURATION_MS : MISSION_DURATION_MS,
       score: 0,
       phase: 0,
       stats: createStats(),
@@ -250,7 +255,7 @@ function App() {
     setSignal(initialSignal)
     setMovementError(null)
     setWarning(null)
-    setToast('INFILTRATION ACTIVE')
+    setToast(t('toast.infiltration'))
     setScreen('playing')
     play('scan')
     window.setTimeout(() => setToast(null), 1400)
@@ -281,9 +286,9 @@ function App() {
       setRemainingMs(remaining)
       const phaseElapsed = performance.now() - session.phaseStartedAt
       if (remaining < 0) {
-        setWarning('OVERTIME — the vault is still reachable. Moves now score ×0.5.')
+        setWarning(t('warn.overtime'))
       } else if (phaseElapsed > 12_000 && Math.floor(phaseElapsed / 4000) > 2) {
-        setWarning('MISSION WARNING — take your time. The motion target is still active.')
+        setWarning(t('warn.slow'))
       }
       // Only an abandoned session ends without the vault.
       if (-remaining > OVERTIME_LIMIT_MS && session.phase < MISSION.length) finishMission(session)
@@ -336,7 +341,7 @@ function App() {
 
   const currentAction = game && game.phase < MISSION.length ? MISSION[game.phase] : MISSION[MISSION.length - 1]
   const accuracy = game ? scoreAccuracy(game) : 0
-  const cameraTag = camera.status === 'tracking' && frameRef.current ? 'BODY DETECTED' : camera.status === 'tracking' ? 'MOVE INTO FRAME' : camera.message
+  const cameraTag = camera.status === 'tracking' && frameRef.current ? t('camera.bodyDetected') : camera.status === 'tracking' ? t('camera.moveIntoFrame') : t(camera.message)
   const motionProgress = Math.round(signal.progress * 100)
 
   return (
@@ -347,30 +352,27 @@ function App() {
 
       {screen === 'landing' && (
         <section className="landing panel-frame">
-          <div className="eyebrow"><span className="live-dot" /> ADMIT HACKATHON / MOTION CASE</div>
+          <div className="eyebrow"><span className="live-dot" /> {t('landing.eyebrow')}</div>
           <div className="landing-copy">
-            <p className="serial">MISSION INTERFACE // 01</p>
+            <p className="serial">{t('landing.serial')}</p>
             <h1>MOTION<span>:</span> HEIST</h1>
-            <p className="tagline">YOUR BODY IS THE CONTROLLER</p>
-            <p className="intro">Infiltrate a high-security vault with five precise movements. No controller. No keyboard. Just move.</p>
+            <p className="tagline">{t('landing.tagline')}</p>
+            <p className="intro">{t('landing.intro')}</p>
           </div>
           <div className="landing-controls">
-            <label className="name-field">OPERATIVE NAME
-              <input maxLength={16} value={playerName} onChange={(event) => setPlayerName(event.target.value)} placeholder="OPERATIVE" aria-label="Operative name" />
+            <label className="name-field">{t('landing.name')}
+              <input maxLength={16} value={playerName} onChange={(event) => setPlayerName(event.target.value)} placeholder={t('landing.namePlaceholder')} aria-label={t('landing.name')} />
             </label>
             <button className={`demo-toggle ${demoMode ? 'enabled' : ''}`} onClick={() => setDemoMode((enabled) => !enabled)} aria-pressed={demoMode}>
-              <span>JURY DEMO MODE</span><b>{demoMode ? 'ON · 55 SEC' : 'OFF · 90 SEC'}</b>
+              <span>{t('landing.demo')}</span><b>{demoMode ? t('landing.demoOn') : t('landing.demoOff')}</b>
             </button>
-            <button className="primary-button" onClick={() => void startHeist()}><span>START HEIST</span><b>→</b></button>
-            <p className="button-note">Camera access is requested after start.</p>
+            <button className="primary-button" onClick={() => void startHeist()}><span>{t('mode.story')}</span><b>→</b></button>
+            <p className="button-note">{t('landing.note')}</p>
           </div>
           <div className="landing-meta">
-            <span>NO KEYBOARD</span><i /> <span>NO MOUSE</span><i /> <span>JUST MOVE</span>
+            <span>{t('landing.noKeyboard')}</span><i /> <span>{t('landing.noMouse')}</span><i /> <span>{t('landing.justMove')}</span>
           </div>
-          <div className="gesture-strip" aria-label="Mission gestures">
-            {['RAISE', 'LEAN L', 'LEAN R', 'SQUAT', 'BREACH'].map((item, index) => <span key={item}><b>0{index + 1}</b>{item}</span>)}
-          </div>
-          <button className="quiet-button leaderboard-launch" onClick={() => setScreen('leaderboard')}>LOCAL LEADERBOARD ↗</button>
+          <div className="landing-corner"><LangToggle /><button className="quiet-button" onClick={() => setScreen('leaderboard')}>{t('landing.leaderboard')}</button></div>
         </section>
       )}
 
@@ -385,13 +387,14 @@ function App() {
           <div className="scanline" />
           <canvas ref={laserCanvasRef} className="laser-canvas" />
           <div className={`desk-badge ${camera.trackingMode === 'desk' && camera.status === 'tracking' ? 'visible' : ''}`} role="status" aria-hidden={camera.trackingMode !== 'desk'}>
-            <span className="desk-badge-dot" /><b>DESK MODE ACTIVE</b><i /><span>UPPER-BODY TRACKING</span>
+            <span className="desk-badge-dot" /><b>{t('desk.active')}</b><i /><span>{t('desk.tracking')}</span>
           </div>
-          {screen === 'playing' && currentAction.gesture !== 'SQUAT' && currentAction.gesture !== 'VAULT_BREACH' && <div className={`laser laser-${game?.phase ?? 0}`} />}
+          {screen === 'playing' && (currentAction.gesture === 'LEAN_LEFT' || currentAction.gesture === 'LEAN_RIGHT' || currentAction.gesture === 'RIGHT_HAND_UP') && <div className="laser" />}
+          {screen === 'playing' && currentAction.gesture === 'FREEZE' && <div className={`searchlight ${signal.error ? 'spotted' : ''}`} aria-hidden="true"><span>{t('searchlight.label')}</span></div>}
           {screen === 'results' && (
             <div className="cctv-overlay" aria-live="polite">
-              <span className="cctv-tag"><i /> CCTV 03 · OPERATIVE LIVE</span>
-              <span className="cctv-replay">{replayProgress > 0 ? `REPLAY ${Math.round(replayProgress * 100)}%` : 'RAISE BOTH HANDS TO REPLAY'}</span>
+              <span className="cctv-tag"><i /> {t('dossier.cctv')}</span>
+              <span className="cctv-replay">{replayProgress > 0 ? t('common.replayProgress', { n: Math.round(replayProgress * 100) }) : t('common.replayGesture')}</span>
               <span className="cctv-meter"><b style={{ width: `${replayProgress * 100}%` }} /></span>
             </div>
           )}
@@ -402,21 +405,21 @@ function App() {
         <section className={`mission-view ${screen === 'playing' && game && game.phase >= MISSION.length ? 'vault-exit' : ''}`}>
           {screen === 'calibrating' && (
             <div className="calibration-overlay">
-              <p className="eyebrow"><span className="live-dot" /> CAMERA CALIBRATION</p>
-              <h2>{camera.status === 'tracking' ? calibrationProgress < .2 ? 'MOVE INTO FRAME' : 'HOLD YOUR POSITION' : 'INITIALIZING CAMERA'}</h2>
-              <p>{camera.status !== 'tracking' ? camera.message : camera.trackingMode === 'desk' ? 'Desk mode: sit upright with your head and shoulders in frame.' : 'Stand back until your shoulders, hips and knees are visible.'}</p>
+              <p className="eyebrow"><span className="live-dot" /> {t('calib.eyebrow')}</p>
+              <h2>{camera.status === 'tracking' ? calibrationProgress < .2 ? t('camera.moveIntoFrame') : t('calib.hold') : t('calib.init')}</h2>
+              <p>{camera.status !== 'tracking' ? t(camera.message) : camera.trackingMode === 'desk' ? t('calib.desk') : t('calib.full')}</p>
               <div className="calibration-bar"><span style={{ width: `${calibrationProgress * 100}%` }} /></div>
-              <div className="calibration-readout"><span>{Math.round(calibrationProgress * 100)}% BODY MAP</span><span>{camera.fps ? `${camera.fps} FPS` : 'LINKING'}</span></div>
-              {(camera.status === 'denied' || camera.status === 'error' || camera.status === 'unsupported') && <button className="primary-button compact" onClick={() => void startHeist()}>RETRY CAMERA</button>}
+              <div className="calibration-readout"><span>{t('calib.bodyMap', { n: Math.round(calibrationProgress * 100) })}</span><span>{camera.fps ? `${camera.fps} FPS` : t('calib.linking')}</span></div>
+              {(camera.status === 'denied' || camera.status === 'error' || camera.status === 'unsupported') && <button className="primary-button compact" onClick={() => void startHeist()}>{t('camera.retry')}</button>}
             </div>
           )}
 
           {screen === 'briefing' && (
             <div className="briefing-overlay">
-              <p className="eyebrow"><span className="live-dot" /> BODY LOCKED / SYSTEM READY</p>
-              <h2>VAULT SECURITY<br /><em>ACTIVE</em></h2>
-              <div className="briefing-data"><span>TIME LIMIT <b>{demoMode ? '55 SEC' : '90 SEC'}</b></span><span>OBJECTIVE <b>BREAK INTO THE VAULT</b></span></div>
-              <p className="get-ready">GET READY</p>
+              <p className="eyebrow"><span className="live-dot" /> {t('brief.eyebrow')}</p>
+              <h2>{t('brief.title1')}<br /><em>{t('brief.title2')}</em></h2>
+              <div className="briefing-data"><span>{t('brief.limit')} <b>{t('common.sec', { n: (demoMode ? DEMO_DURATION_MS : MISSION_DURATION_MS) / 1000 })}</b></span><span>{t('brief.objective')} <b>{t('brief.objectiveValue')}</b></span></div>
+              <p className="get-ready">{t('brief.ready')}</p>
               <strong className="countdown">{countdown}</strong>
             </div>
           )}
@@ -424,23 +427,23 @@ function App() {
           {screen === 'playing' && game && (
             <>
               <header className="hud-top">
-                <div><span>MISSION 01</span><b>VAULT INFILTRATION</b></div>
-                <div className="time-readout"><span>{remainingMs < 0 ? 'OVERTIME' : 'TIME'}</span><b className={remainingMs < 20_000 ? 'urgent' : ''}>{formatTime(remainingMs)}</b></div>
-                <div className="score-readout"><span>SCORE</span><b>{game.score.toLocaleString()}</b></div>
+                <div><span>{t('hud.mission')}</span><b>{t('hud.missionName')}</b></div>
+                <div className="time-readout"><span>{remainingMs < 0 ? t('hud.overtime') : t('common.time')}</span><b className={remainingMs < 20_000 ? 'urgent' : ''}>{formatTime(remainingMs)}</b></div>
+                <div className="score-readout"><span>{t('common.score')}</span><b>{game.score.toLocaleString()}</b></div>
               </header>
-              <aside className="camera-status"><span className={frameRef.current ? 'live-dot' : 'warning-dot'} /> <b>CAMERA</b> {cameraTag}<small>{camera.fps || '--'} FPS</small></aside>
+              <aside className="camera-status"><span className={frameRef.current ? 'live-dot' : 'warning-dot'} /> <b>{t('camera.label')}</b> {cameraTag}<small>{camera.fps || '--'} FPS</small></aside>
               {currentAction.gesture === 'VAULT_BREACH' && <VaultStage videoRef={videoRef} feedRef={vaultFeedRef} getAudioContext={getAudioContext} />}
               <section className={`objective-card ${currentAction.gesture === 'VAULT_BREACH' ? 'vault-docked' : ''}`}>
-                <span className="phase">{currentAction.scene}</span>
-                <h2>{currentAction.objective}</h2>
-                <p>{camera.trackingMode === 'desk' && currentAction.deskHint ? currentAction.deskHint : currentAction.hint}</p>
+                <span className="phase">{t(`move.${currentAction.gesture}.scene`)} / {String((game?.phase ?? 0) + 1).padStart(2, '0')}</span>
+                <h2>{t(`move.${currentAction.gesture}.name`)}</h2>
+                <p>{camera.trackingMode === 'desk' && currentAction.gesture === 'SQUAT' ? t('move.SQUAT.deskHint') : t(`move.${currentAction.gesture}.hint`)}</p>
                 <div className="hold-meter"><span style={{ width: `${motionProgress}%` }} /></div>
-                <div className="meter-label"><span>{signal.recalibrating ? 'RE-LOCKING BODY MAP' : signal.valid ? 'VALIDATING HOLD' : signal.attempting ? 'MOTION DETECTED' : 'WAITING FOR MOTION'}</span><b>{motionProgress}%</b></div>
+                <div className="meter-label"><span>{signal.recalibrating ? t('hud.relocking') : signal.valid ? t('hud.validating') : signal.attempting ? t('hud.detected') : t('hud.waiting')}</span><b>{motionProgress}%</b></div>
               </section>
               <aside className="mission-rail">
-                {MISSION.map((action, index) => <div key={action.gesture} className={index < game.phase ? 'done' : index === game.phase ? 'active' : ''}><b>0{index + 1}</b><span>{action.objective}</span></div>)}
+                {MISSION.map((action, index) => <div key={action.gesture} className={index < game.phase ? 'done' : index === game.phase ? 'active' : ''}><b>0{index + 1}</b><span>{t(`move.${action.gesture}.name`)}</span></div>)}
               </aside>
-              <aside className="combo-card"><span>COMBO</span><b>×{game.stats.combo}</b><small>ACCURACY {accuracy}%</small></aside>
+              <aside className="combo-card"><span>{t('common.combo')}</span><b>×{game.stats.combo}</b><small>{t('common.accuracy', { n: accuracy })}</small></aside>
               {movementError && <ErrorOverlay error={movementError} />}
               {warning && <div className="warning-banner">⚠ {warning}</div>}
               {toast && <div className="success-toast">✓ {toast}</div>}
@@ -454,7 +457,7 @@ function App() {
           report={dossier}
           defaultCallsign={playerName}
           onReplay={() => void startHeist()}
-          replayHint={camera.status === 'tracking' ? 'OR RAISE BOTH HANDS FOR 1.2 S' : undefined}
+          replayHint={camera.status === 'tracking' ? t('common.orRaiseHands') : undefined}
           onExit={exitToLobby}
           onLeaderboardChange={setLeaderboard}
           onBoot={playBoot}
@@ -464,24 +467,30 @@ function App() {
 
       {screen === 'leaderboard' && (
         <section className="leaderboard-screen panel-frame">
-          <button className="back-button" onClick={() => setScreen(dossier ? 'results' : 'landing')}>← BACK</button>
-          <p className="eyebrow"><span className="live-dot" /> LOCAL VAULT RECORDS</p>
-          <h1>LEADER<span>BOARD</span></h1>
-          <p className="board-note">Stored only in this browser. Top ten infiltrations.</p>
+          <button className="back-button" onClick={() => setScreen(dossier ? 'results' : 'landing')}>{t('common.back')}</button>
+          <p className="eyebrow"><span className="live-dot" /> {t('board.eyebrow')}</p>
+          <h1>{t('board.title1')}<span>{t('board.title2')}</span></h1>
+          <p className="board-note">{t('board.note')}</p>
           <div className="score-table">
-            <div className="table-head"><span>RANK</span><span>OPERATIVE</span><span>STYLE</span><span>ACCURACY</span><span>SCORE</span></div>
-            {leaderboard.length ? leaderboard.map((entry, index) => <div className="table-row" key={entry.id}><span>0{index + 1}</span><b>{entry.nickname}</b><span>{entry.style}</span><span>{entry.accuracy}%</span><strong>{entry.score.toLocaleString()}</strong></div>) : <p className="empty-board">No records yet. Your vault is waiting.</p>}
+            <div className="table-head"><span>{t('board.rank')}</span><span>{t('board.operative')}</span><span>{t('board.style')}</span><span>{t('board.accuracy')}</span><span>{t('common.score')}</span></div>
+            {leaderboard.length ? leaderboard.map((entry, index) => <div className="table-row" key={entry.id}><span>0{index + 1}</span><b>{entry.nickname}</b><span>{styleLabel(entry.style)}</span><span>{entry.accuracy}%</span><strong>{entry.score.toLocaleString()}</strong></div>) : <p className="empty-board">{t('board.empty')}</p>}
           </div>
-          {!dossier && <button className="primary-button compact" onClick={() => setScreen('landing')}>START A HEIST</button>}
+          {!dossier && <button className="primary-button compact" onClick={() => setScreen('landing')}>{t('board.start')}</button>}
         </section>
       )}
     </main>
   )
 }
 
+/** Ranks are stored as English ids; older records may hold free text, shown as-is. */
+const styleLabel = (style: string) => {
+  const key = `rank.${style}`
+  return key in STRINGS ? t(key as StringKey) : style
+}
+
 function ErrorOverlay({ error }: { error: MovementError }) {
   return <aside className="error-overlay" role="status" aria-live="polite">
-    <div className="error-title"><span>⚠</span><div><small>MOVEMENT ERROR</small><b>{error.title}</b></div></div>
+    <div className="error-title"><span>⚠</span><div><small>{t('hud.error')}</small><b>{error.title}</b></div></div>
     <p>{error.detail}</p>
     <div className="error-correction"><strong>{error.arrow}</strong><span>{error.correction}</span></div>
     <div className="error-measures"><span>{error.current}</span><i /><b>{error.target}</b></div>

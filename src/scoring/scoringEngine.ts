@@ -66,7 +66,7 @@ export const formatSeconds = (ms: number | null) => (ms === null ? '—' : `${(m
 
 const mean = (values: number[]) => (values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0)
 
-/** Unreached phases still appear in the report so the jury sees the full five-movement plan. */
+/** Unreached phases still appear in the report so the jury sees the full movement plan. */
 const withUnreached = (phases: PhaseTelemetry[], mission: GameAction[]): PhaseTelemetry[] =>
   mission.map((action, index) => phases[index] ?? {
     index,
@@ -92,6 +92,7 @@ export const buildDossier = (telemetry: MissionTelemetry, mission: GameAction[])
   const recoveries: RecoveryEntry[] = phases
     .filter((phase) => phase.anomalies.length > 0)
     .map((phase) => ({
+      gesture: phase.gesture,
       objective: phase.objective,
       anomaly: phase.anomalies[0],
       followUps: phase.anomalies.slice(1),

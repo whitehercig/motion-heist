@@ -2,14 +2,17 @@ import { FilesetResolver, PoseLandmarker } from '@mediapipe/tasks-vision'
 import wasmLoaderUrl from '@mediapipe/tasks-vision/vision_wasm_internal.js?url'
 import wasmBinaryUrl from '@mediapipe/tasks-vision/vision_wasm_internal.wasm?url'
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
+import type { StringKey } from '../i18n/i18n'
 import { LowerBodyTracker } from '../motion/trackingMode'
 import type { Landmark, PoseFrame, TrackingMode } from '../types/pose'
 
 export type CameraStatus = 'idle' | 'requesting' | 'initializing' | 'tracking' | 'denied' | 'unsupported' | 'error'
+/** An i18n key; the UI translates it so a language switch also updates the camera status line. */
+export type CameraMessage = Extract<StringKey, `camera.${string}`>
 
 interface CameraState {
   status: CameraStatus
-  message: string
+  message: CameraMessage
   fps: number
   trackingMode: TrackingMode
 }
@@ -123,7 +126,7 @@ const snapshot = (
 })
 
 export const usePoseCamera = ({ videoRef, canvasRef, onFrame, focusPoints = [] }: UsePoseCameraOptions) => {
-  const [state, setState] = useState<CameraState>({ status: 'idle', message: 'Camera standing by.', fps: 0, trackingMode: 'full' })
+  const [state, setState] = useState<CameraState>({ status: 'idle', message: 'camera.idle', fps: 0, trackingMode: 'full' })
   const detectorRef = useRef<PoseLandmarker | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const animationRef = useRef<number | null>(null)
@@ -151,22 +154,22 @@ export const usePoseCamera = ({ videoRef, canvasRef, onFrame, focusPoints = [] }
     if (video) video.srcObject = null
     onFrameRef.current(null)
     trackerRef.current.reset()
-    if (mountedRef.current) setState({ status: 'idle', message: 'Camera paused.', fps: 0, trackingMode: 'full' })
+    if (mountedRef.current) setState({ status: 'idle', message: 'camera.paused', fps: 0, trackingMode: 'full' })
   }, [videoRef])
 
   const start = useCallback(async () => {
     if (detectorRef.current || streamRef.current) return
     if (!navigator.mediaDevices?.getUserMedia) {
-      setState((current) => ({ ...current, status: 'unsupported', message: 'This browser cannot access a camera.', fps: 0 }))
+      setState((current) => ({ ...current, status: 'unsupported', message: 'camera.unsupported', fps: 0 }))
       return
     }
     if (!window.isSecureContext && location.hostname !== 'localhost') {
-      setState((current) => ({ ...current, status: 'unsupported', message: 'Camera requires HTTPS. Open the secure deployment.', fps: 0 }))
+      setState((current) => ({ ...current, status: 'unsupported', message: 'camera.https', fps: 0 }))
       return
     }
 
     try {
-      setState((current) => ({ ...current, status: 'requesting', message: 'Requesting camera access…', fps: 0 }))
+      setState((current) => ({ ...current, status: 'requesting', message: 'camera.requesting', fps: 0 }))
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } },
         audio: false,
@@ -182,7 +185,7 @@ export const usePoseCamera = ({ videoRef, canvasRef, onFrame, focusPoints = [] }
       await new Promise<void>((resolve) => { video.onloadedmetadata = () => resolve() })
       await video.play()
 
-      setState((current) => ({ ...current, status: 'initializing', message: 'Loading motion intelligence…', fps: 0 }))
+      setState((current) => ({ ...current, status: 'initializing', message: 'camera.loading', fps: 0 }))
       detectorRef.current = await createDetector(['GPU', 'CPU'])
       if (!mountedRef.current || !streamRef.current) {
         detectorRef.current?.close()
@@ -192,7 +195,7 @@ export const usePoseCamera = ({ videoRef, canvasRef, onFrame, focusPoints = [] }
       trackerRef.current.reset()
       failuresRef.current = 0
       fpsStartedRef.current = performance.now()
-      setState((current) => ({ ...current, status: 'tracking', message: 'Motion system online.', fps: 0 }))
+      setState((current) => ({ ...current, status: 'tracking', message: 'camera.online', fps: 0 }))
 
       const recoverOnCpu = async () => {
         recoveringRef.current = true
@@ -204,7 +207,7 @@ export const usePoseCamera = ({ videoRef, canvasRef, onFrame, focusPoints = [] }
           else detector.close()
           failuresRef.current = 0
         } catch {
-          if (mountedRef.current) setState((current) => ({ ...current, status: 'error', message: 'The motion model stopped responding. Retry the camera.', fps: 0 }))
+          if (mountedRef.current) setState((current) => ({ ...current, status: 'error', message: 'camera.stalled', fps: 0 }))
         } finally {
           recoveringRef.current = false
         }
@@ -259,13 +262,13 @@ export const usePoseCamera = ({ videoRef, canvasRef, onFrame, focusPoints = [] }
       streamRef.current?.getTracks().forEach((track) => track.stop())
       streamRef.current = null
       const name = error instanceof DOMException ? error.name : ''
-      const message = name === 'NotAllowedError'
-        ? 'Camera access was denied. Allow it in your browser, then retry.'
+      const message: CameraMessage = name === 'NotAllowedError'
+        ? 'camera.denied'
         : name === 'NotFoundError' || name === 'OverconstrainedError'
-          ? 'No usable camera was found. Connect a camera and retry.'
+          ? 'camera.notFound'
           : name === 'NotReadableError'
-            ? 'The camera is busy in another app (Zoom, Meet, OBS…). Close it, then retry.'
-            : 'The motion system could not start. Check your connection and retry.'
+            ? 'camera.busy'
+            : 'camera.failed'
       if (mountedRef.current) setState((current) => ({ ...current, status: name === 'NotAllowedError' ? 'denied' : 'error', message, fps: 0 }))
     }
   }, [canvasRef, videoRef])

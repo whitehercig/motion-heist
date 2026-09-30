@@ -1,14 +1,20 @@
 import type { GameAction } from '../types/game'
 
+/**
+ * Three acts: get past the guard, cross the laser corridor, crack the vault.
+ * Names, hints and scenes are looked up in the i18n table by gesture.
+ */
 export const MISSION: GameAction[] = [
-  { gesture: 'RIGHT_HAND_UP', objective: 'SCAN ACCESS', hint: 'Raise your right hand above your shoulder.', scene: 'SECURITY NODE / 01' },
-  { gesture: 'LEAN_LEFT', objective: 'DODGE LEFT', hint: 'Lean left before the laser reaches you.', scene: 'LASER GRID / 02' },
-  { gesture: 'LEAN_RIGHT', objective: 'DODGE RIGHT', hint: 'Shift your torso to the right.', scene: 'LASER GRID / 03' },
-  { gesture: 'SQUAT', objective: 'DUCK UNDER LASER', hint: 'Duck until your head and shoulders pass under the beam.', deskHint: 'Lean your head and chest down toward the desk, under the beam.', scene: 'LOW BEAM / 04' },
-  { gesture: 'VAULT_BREACH', objective: 'OPEN VAULT', hint: 'Palms on both scanners, then pull the doors apart.', scene: 'VAULT CORE / 05' },
+  { gesture: 'RIGHT_HAND_UP', objective: 'SCAN ACCESS', act: 1 },
+  { gesture: 'FREEZE', objective: 'GUARD PATROL', act: 1 },
+  { gesture: 'LEAN_LEFT', objective: 'DODGE LEFT', act: 2 },
+  { gesture: 'LEAN_RIGHT', objective: 'DODGE RIGHT', act: 2 },
+  { gesture: 'SQUAT', objective: 'DUCK UNDER LASER', act: 2 },
+  { gesture: 'VAULT_BREACH', objective: 'OPEN VAULT', act: 3 },
 ]
 
 export const MISSION_DURATION_MS = 90_000
+export const DEMO_DURATION_MS = 60_000
 
 /**
  * The time limit never ends the run: the mission rolls into OVERTIME, where

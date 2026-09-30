@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, type RefObject } from 'react'
+import { t } from '../i18n/i18n'
 import { laserCorrectionParts } from '../errors/errorAnalyzer'
 import {
   drawBeam,
@@ -170,7 +171,7 @@ export const useLaserCanvas = ({ canvasRef, videoRef, active, onBreach }: UseLas
           const alpha = age < CLEARED_HOLD_MS ? 1 : 1 - (age - CLEARED_HOLD_MS) / CLEARED_FADE_MS
           const y = runtime.clearedBeamY * height
           drawBeam(context, { y, bounds, reveal: 1, breach: false, clearMix: 1, alpha, t: now, px })
-          drawBeamStatus(context, 'BEAM CLEARED', centerX, y - 16 * px, alpha, 22, px)
+          drawBeamStatus(context, t('laser.cleared'), centerX, y - 16 * px, alpha, 22, px)
         }
       } else if (runtime.reading) {
         const reading = runtime.reading
@@ -195,7 +196,7 @@ export const useLaserCanvas = ({ canvasRef, videoRef, active, onBreach }: UseLas
           const [headline, measures] = laserCorrectionParts(reading)
           drawCorrectionLabel(context, headline, measures, worstX, (worstY + y) / 2, bounds, px)
         } else if (reveal >= 1 && runtime.holdProgress > 0) {
-          drawBeamStatus(context, `CLEARING ${Math.round(runtime.holdProgress * 100)}%`, centerX, y - 14 * px, clamp(runtime.clearMix * 1.5), 15, px)
+          drawBeamStatus(context, t('laser.clearing', { n: Math.round(runtime.holdProgress * 100) }), centerX, y - 14 * px, clamp(runtime.clearMix * 1.5), 15, px)
         }
       }
 

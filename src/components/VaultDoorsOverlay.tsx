@@ -1,4 +1,5 @@
 import { useEffect, useRef, type RefObject } from 'react'
+import { t } from '../i18n/i18n'
 import { createCoverViewport, measureCoverViewport, syncCanvasToVideo } from '../render/coverViewport'
 import type { VaultReading } from '../types/game'
 
@@ -369,7 +370,7 @@ const drawCursors = (ctx: CanvasRenderingContext2D, reading: VaultReading, width
 const drawReadout = (ctx: CanvasRenderingContext2D, reading: VaultReading, seam: number, y: number, px: number) => {
   const breaching = reading.phase === 'breaching'
   const value = breaching ? reading.breachProgress : reading.lockProgress
-  const label = breaching ? `BREACH ${Math.round(value * 100)}%` : `CHARGING ${Math.round(value * 100)}%`
+  const label = t(breaching ? 'vault.breachMeter' : 'vault.chargeMeter', { n: Math.round(value * 100) })
   const barWidth = 220 * px
   ctx.save()
   ctx.fillStyle = 'rgba(3, 8, 14, 0.78)'

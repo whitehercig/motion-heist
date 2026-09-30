@@ -1,0 +1,32 @@
+/* Styles for the features added on top of the original heist: i18n toggle, guard
+   searchlight, mode select, move list, training, arcade, duel, photo finish, juice. */
+
+:root {
+  --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --cyan: #42ead8;
+  --blue: #2e80ff;
+  --gold: #ffc45c;
+  --red: #ff2d55;
+  --ink: #05070d;
+}
+
+/* ── Language / sound toggles ─────────────────────────────────────── */
+.lang-toggle { display: inline-flex; border: 1px solid rgba(110, 157, 202, .35); background: rgba(5, 10, 20, .6); }
+.lang-toggle button { border: 0; padding: 7px 10px; background: transparent; color: #7d96ae; font-family: var(--mono); font-size: .64rem; font-weight: 800; letter-spacing: .12em; }
+.lang-toggle button.active { background: var(--cyan); color: var(--ink); }
+.landing-corner { position: absolute; right: 7vw; top: 50px; display: flex; gap: 10px; align-items: center; z-index: 2; }
+.landing-corner .quiet-button { color: #a9bdd2; background: transparent; padding: 8px; }
+.landing-corner .quiet-button:hover { color: var(--cyan); }
+.sound-toggle { border: 1px solid rgba(110, 157, 202, .35); background: rgba(5, 10, 20, .6); color: #a9bdd2; font-family: var(--mono); font-size: .62rem; font-weight: 800; letter-spacing: .1em; padding: 7px 10px; }
+.sound-toggle.off { color: #637891; }
+.dossier-toolbar { float: right; }
+.dossier-toolbar .lang-toggle { border-color: rgba(0, 255, 136, .3); }
+.dossier-toolbar .lang-toggle button.active { background: #00ff88; }
+
+/* ── Guard searchlight (FREEZE) ───────────────────────────────────── */
+.searchlight { position: absolute; inset: 0; z-index: 2; pointer-events: none; background: radial-gradient(ellipse 22% 60% at var(--beam-x, 50%) 55%, rgba(255, 236, 170, .34), rgba(255, 220, 120, .1) 55%, transparent 72%); animation: searchSweep 3.2s ease-in-out infinite alternate; mix-blend-mode: screen; }
+.searchlight span { position: absolute; top: 96px; left: 50%; transform: translateX(-50%); font-family: var(--mono); font-size: .62rem; font-weight: 800; letter-spacing: .2em; color: #ffe39a; background: rgba(40, 30, 5, .6); border: 1px solid rgba(255, 220, 120, .6); padding: 6px 12px; white-space: nowrap; }
+.searchlight.spotted { background: radial-gradient(ellipse 26% 64% at var(--beam-x, 50%) 55%, rgba(255, 60, 60, .42), rgba(255, 40, 40, .12) 55%, transparent 72%); }
+.searchlight.spotted span { color: #fff; background: rgba(120, 10, 20, .8); border-color: var(--red); }
+@property --beam-x { syntax: "<percentage>"; inherits: false; initial-value: 50%; }
+@keyframes searchSweep { from { --beam-x: 30%; } to { --beam-x: 70%; } }

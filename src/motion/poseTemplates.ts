@@ -105,6 +105,17 @@ export const POSE_TEMPLATES: Record<GestureId, PoseTemplate> = {
     levelWeight: 0,
     gaugeSide: -1,
   },
+  FREEZE: {
+    id: 'GUARD_FREEZE',
+    gesture: 'FREEZE',
+    label: 'GUARD PATROL',
+    // Statue stance: upright, arms hanging. Validation is stillness, not shape; the ghost just shows the calm pose.
+    joints: skeleton(UPRIGHT_SHOULDERS, UPRIGHT_NOSE, HANGING, HANGING),
+    bones: bones({ weight: 1, toleranceDeg: 25 }, [loose, loose], [loose, loose]),
+    anchorDrop: 0,
+    levelWeight: 0,
+    gaugeSide: 1,
+  },
   LEAN_LEFT: {
     id: 'DODGE_LEFT',
     gesture: 'LEAN_LEFT',

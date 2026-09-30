@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
+import { t, type StringKey } from '../../i18n/i18n'
 import { playVaultSequence, type VaultSequence } from '../../audio/soundEngine'
 import { VaultDoorsOverlay } from '../../components/VaultDoorsOverlay'
 import { VAULT_LOCK_MS } from '../../motion/vaultBreach'
@@ -10,13 +11,12 @@ interface VaultStageProps {
   getAudioContext: () => AudioContext
 }
 
-const STATUS: Record<VaultPhase, string> = {
-  align: 'PALM LOCK: PLACE BOTH PALMS ON THE SCANNERS',
-  locking: 'PALM LOCK: HOLD STILL — CHARGING',
-  breaching: 'BREACH READY: PULL ARMS APART',
-  breached: 'VAULT BREACHED',
+const STATUS: Record<VaultPhase, StringKey> = {
+  align: 'vault.align',
+  locking: 'vault.locking',
+  breaching: 'vault.breaching',
+  breached: 'vault.breached',
 }
-const RELEASE_HINT = "DON'T RELEASE — PULL WIDER"
 const HINT_MS = 2600
 
 const vibrate = (pattern: number | number[]) => {
@@ -93,7 +93,7 @@ export function VaultStage({ videoRef, feedRef, getAudioContext }: VaultStagePro
       }
       if (reading.releasedAt !== null && reading.releasedAt !== seen.releasedAt) {
         seen.releasedAt = reading.releasedAt
-        setHint(RELEASE_HINT)
+        setHint(t('err.release.title'))
         window.clearTimeout(hintTimer)
         hintTimer = window.setTimeout(() => setHint(null), HINT_MS)
       }
@@ -140,12 +140,12 @@ export function VaultStage({ videoRef, feedRef, getAudioContext }: VaultStagePro
   return (
     <>
       <VaultDoorsOverlay videoRef={videoRef} feedRef={feedRef} onImpact={handleImpact} />
-      {!breached && <div className={`vault-status vault-status-${phase}`} role="status" aria-live="polite">{STATUS[phase]}</div>}
+      {!breached && <div className={`vault-status vault-status-${phase}`} role="status" aria-live="polite">{t(STATUS[phase])}</div>}
       {hint && !breached && <div className="vault-hint" role="alert">⚠ {hint}</div>}
       {breached && (
         <>
           <div className="screen-flash" aria-hidden="true" />
-          <div className="vault-banner" role="status"><b>VAULT BREACHED</b><span>—</span><b>MISSION ACCOMPLISHED</b></div>
+          <div className="vault-banner" role="status"><b>{t('vault.breached')}</b><span>—</span><b>{t('vault.accomplished')}</b></div>
         </>
       )}
     </>
