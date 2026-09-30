@@ -23,7 +23,12 @@ const tracked = (point: Landmark) => (point.visibility ?? 1) >= LASER_CONFIG.min
 export const laserBeamY = (baseline: CalibrationBaseline) =>
   baseline.shoulderY + (baseline.hipY - baseline.shoulderY) * LASER_CONFIG.beamTorsoRatio
 
-const toCm = (delta: number, torsoHeight: number) => Math.round((delta / torsoHeight) * LASER_CONFIG.torsoCm)
+/** Beam height for the baseline's tracking mode: chest level standing, the desk-drop target seated. */
+export const beamYFor = (baseline: CalibrationBaseline) => baseline.mode === 'desk'
+  ? deskLevel(baseline.shoulderY, baseline.noseY) + (baseline.hipY - baseline.shoulderY) * (GESTURE_CONFIG.SQUAT.deskDrop ?? 0)
+  : laserBeamY(baseline)
+
+const toCm =(delta: number, torsoHeight: number) => Math.round((delta / torsoHeight) * LASER_CONFIG.torsoCm)
 
 /** Full body: every visible critical joint must pass under the beam. */
 const evaluateFullBody = (frame: PoseFrame, baseline: CalibrationBaseline, torsoHeight: number): LaserReading | null => {

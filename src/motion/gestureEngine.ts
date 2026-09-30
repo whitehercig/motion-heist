@@ -164,6 +164,7 @@ const WRONG_WAY_LEAN_DEGREES = 6
  * gets this long to settle after the previous move before the guard calls it.
  */
 const FREEZE_DIAGNOSE_MS = 1100
+const FREEZE_SETTLED_MS = 500
 
 /**
  * A per-target temporal state machine. MediaPipe provides points only; this
@@ -213,8 +214,9 @@ export class GestureEngine {
     const config = GESTURE_CONFIG[target]
 
     if (valid) {
-      this.attemptSince = null
       if (this.activeSince === null) this.activeSince = now
+      // The still instant at the turn of a wave is not settling down: FREEZE keeps its diagnosis clock until the hold is real.
+      if (target !== 'FREEZE' || now - this.activeSince > FREEZE_SETTLED_MS) this.attemptSince = null
       const progress = clamp((now - this.activeSince) / config.holdMs)
       const success = progress >= 1 && now >= this.cooldownUntil
       if (success) {

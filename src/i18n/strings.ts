@@ -18,6 +18,7 @@ export const STRINGS = {
   'common.soundOff': ['SOUND OFF', 'ЗВУК ВЫКЛ'],
   'common.replayGesture': ['RAISE BOTH HANDS TO REPLAY', 'ПОДНИМИ ОБЕ РУКИ ДЛЯ ПОВТОРА'],
   'common.replayProgress': ['REPLAY {n}%', 'ПОВТОР {n}%'],
+  'common.holdProgress': ['HOLD {n}%', 'ДЕРЖИ {n}%'],
   'common.orRaiseHands': ['OR RAISE BOTH HANDS FOR 1.2 S', 'ИЛИ ПОДНИМИ ОБЕ РУКИ НА 1.2 С'],
   'side.left': ['left', 'влево'],
   'side.right': ['right', 'вправо'],
@@ -197,7 +198,7 @@ export const STRINGS = {
 
   // ── Duel ──────────────────────────────────────────────────────────────
   'duel.swapTitle': ['PLAYER 2, YOUR TURN', 'ИГРОК 2, ТВОЙ ХОД'],
-  'duel.swapText': ['Player 1 scored {score}. Swap places — same lasers, same timing.', 'Игрок 1 набрал {score}. Поменяйтесь местами — те же лазеры, тот же ритм.'],
+  'duel.swapText': ['Player 1 scored {score}. Swap places — same lasers, same timing.', 'Результат игрока 1: {score}. Поменяйтесь местами — те же лазеры, тот же ритм.'],
   'duel.swapHint': ['RAISE BOTH HANDS OR PRESS START', 'ПОДНИМИ ОБЕ РУКИ ИЛИ НАЖМИ СТАРТ'],
   'duel.start2': ['START PLAYER 2', 'СТАРТ ИГРОКА 2'],
   'duel.result': ['DUEL RESULT', 'ИТОГ ДУЭЛИ'],
